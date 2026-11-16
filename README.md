@@ -8,7 +8,7 @@
 
 画面铺满、没有黑边、文字清晰；断开后一切恢复原样。可选自动关闭其他屏幕，告别远程时Dock栏和窗口跑不见。
 
-[![最新版本](https://img.shields.io/github/v/release/aoyamashou/UUyc-companion?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/aoyamashou/UUyc-companion/releases/latest)
+[![维护版本](https://img.shields.io/badge/r0n9-1.1.4--r0n9-blue)](https://github.com/r0n9/UUyc-companion/releases)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-%E6%94%AF%E6%8C%81-success)
 [![许可证 MIT](https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-MIT-green)](LICENSE)
@@ -18,6 +18,8 @@
 </div>
 
 ---
+
+本仓库由 **r0n9** 基于 [AoyamaShou 的 UUyc companion](https://github.com/aoyamashou/UUyc-companion) 分叉维护，当前发布标识为 **1.1.4-r0n9**。此版本移除了私有构建依赖，修复反复连接或调整分辨率时的虚拟屏身份累积，并提供 DMG 打包与 ColorSync 维护工具。原作者与开源组件的致谢保留在“关于”窗口及许可证中。
 
 ## 为什么需要它
 
@@ -70,17 +72,17 @@ UU远程 的 Mac 被控端没有 Windows 版那样的「超级屏」（虚拟屏
 
 ## 下载
 
-前往 **[Releases 页面](https://github.com/aoyamashou/UUyc-companion/releases/latest)**，下载 `UUyc-companion-<版本号>.zip`。
+前往本仓库的 **[Releases 页面](https://github.com/r0n9/UUyc-companion/releases)**，选择带 `r0n9` 标识的 DMG，例如 `UUyc-companion-1.1.4-r0n9.dmg`。
 
 ## 安装
 
-1. 双击下载的 `.zip` 解压，得到 **UU远程伴侣**（`UUyc companion.app`）
-2. 把它拖进「**应用程序**」文件夹
+1. 双击下载的 `.dmg` 打开安装镜像，找到 **UU远程伴侣**（`UUyc companion.app`）
+2. 把它拖进镜像中的「**Applications（应用程序）**」文件夹
 3. 第一次打开时，macOS 可能会拦住它，请看下面的「解除隔离」
 
 ### 解除隔离（第一次打开被拦住时）
 
-本软件使用作者自己的证书签名，**没有经过苹果公证**（公证需要付费的苹果开发者账号，每年99美刀，作者贫困不想支付）。所以第一次打开时，macOS 可能提示「无法打开」「无法验证开发者」或「已损坏」。这不代表软件有问题，按下面任一方法放行即可：
+本分支当前打包使用临时（ad-hoc）签名，**没有经过 Apple 公证**。首次打开时，macOS 可能提示「无法打开」「无法验证开发者」或「已损坏」，可按下面的方法放行：
 
 **方法一：在系统设置里放行（推荐）**
 
@@ -250,6 +252,8 @@ cd UUyc-companion && SIGN_IDENTITY=- scripts/build-app.sh
 虚拟屏使用两个可复用的固定身份，避免每次连接或改尺寸都生成新的随机序列号。回归测试运行 `scripts/test-connection.sh`；旧版本 ColorSync 记录的审计、备份清理和回退方法见 [虚拟屏身份与 ColorSync 维护](docs/DISPLAY_IDENTITIES.md)。
 
 制作拖拽安装 DMG：运行 `SIGN_IDENTITY=- scripts/build-dmg.sh`，脚本会重新编译应用并生成 `dist/UUyc-companion-<版本号>.dmg`，包含应用、Applications 快捷入口和安装说明。
+
+对外版本号与 DMG 文件名使用 `1.1.4-r0n9`；macOS 标准 `CFBundleShortVersionString` 和 `CFBundleVersion` 使用 `1.1.4`，完整发布标识保存在 `UUDisplayReleaseVersion` 并显示于“关于”窗口。
 
 <details>
 <summary><b>工作原理</b></summary>

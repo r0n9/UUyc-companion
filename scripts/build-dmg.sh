@@ -11,7 +11,7 @@ fi
 scripts/build-app.sh
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :UUDisplayReleaseVersion' "$APP/Contents/Info.plist")"
 IMAGE_NAME="UUyc-companion-$VERSION.dmg"
 DMG_WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$DMG_WORK_DIR"' EXIT
@@ -21,6 +21,8 @@ ditto "$APP" "$PAYLOAD_DIR/$APP_NAME.app"
 ln -s /Applications "$PAYLOAD_DIR/Applications"
 cat > "$PAYLOAD_DIR/安装说明.txt" <<TEXT
 UUyc companion $VERSION（UU远程伴侣）
+
+当前维护者：r0n9。基于 AoyamaShou 的 UUyc companion 原项目分叉维护。
 
 将「UUyc companion.app」拖到「Applications」文件夹，然后从应用程序中打开。
 首次启动时按引导授予辅助功能权限，并填写设备分辨率。

@@ -1,4 +1,4 @@
-// 「关于」窗口：版本、作者主页、开源致谢、免责声明，以及 Debug 编号开关
+// 「关于」窗口：fork 版本、当前维护者、原作者、开源致谢与 Debug 编号开关
 import AppKit
 import SwiftUI
 
@@ -24,12 +24,21 @@ private struct OpenSource: Identifiable {
 }
 
 private enum AboutInfo {
-    static let author: [ExternalLink] = [
-        ExternalLink(title: "作者主页", url: "https://ryou.im", icon: .symbol("globe")),
+    static let repository = "https://github.com/r0n9/UUyc-companion"
+    static let maintainer: [ExternalLink] = [
+        ExternalLink(title: "GitHub 主页", url: "https://github.com/r0n9",
+                     icon: .symbol("person.crop.circle")),
+        ExternalLink(title: "反馈问题", url: repository + "/issues", icon: .symbol("bubble.left")),
+    ]
+
+    static let originalAuthor: [ExternalLink] = [
+        ExternalLink(title: "原作者主页", url: "https://ryou.im", icon: .symbol("globe")),
         ExternalLink(title: "X 主页", url: "https://x.com/corndogjpn2", icon: .text("𝕏", .primary)),
         ExternalLink(title: "小红书", url: "https://xhslink.cn/o/2M9LOaUzn01", icon: .text("书", .red)),
         ExternalLink(title: "GitHub 主页", url: "https://github.com/aoyamashou",
                      icon: .symbol("chevron.left.forwardslash.chevron.right")),
+        ExternalLink(title: "上游仓库", url: "https://github.com/aoyamashou/UUyc-companion",
+                     icon: .symbol("arrow.triangle.branch")),
     ]
 
     static let openSource: [OpenSource] = [
@@ -69,7 +78,8 @@ private struct LinkIconView: View {
 
 private struct AboutView: View {
     @ObservedObject var model: AboutModel
-    private let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版"
+    private let version = Bundle.main.infoDictionary?["UUDisplayReleaseVersion"] as? String
+        ?? Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版（r0n9）"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -80,14 +90,32 @@ private struct AboutView: View {
                     Text("版本 \(version)").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("项目仓库") { AboutInfo.open("https://github.com/r0n9/UUyc-companion") }
+                Button("项目仓库") { AboutInfo.open(AboutInfo.repository) }
             }
-            Text("改善 Mac 版 UU远程 的使用体验，自动提供与您的设备同分辨率的虚拟屏幕，告别上下大黑边。")
+            Text("由 r0n9 基于 AoyamaShou 的原项目维护，自动匹配远程设备分辨率，改善 Mac 版 UU远程 的显示体验。")
                 .fixedSize(horizontal: false, vertical: true)
 
-            section("作者") {
+            section("当前维护者") {
                 HStack(spacing: 8) {
-                    ForEach(AboutInfo.author) { link in
+                    Text("r0n9").font(.body.bold())
+                    ForEach(AboutInfo.maintainer) { link in
+                        Button { AboutInfo.open(link.url) } label: {
+                            HStack(spacing: 5) {
+                                LinkIconView(icon: link.icon).frame(width: 16)
+                                Text(link.title)
+                            }
+                        }
+                        .help(link.url)
+                    }
+                }
+                Text("此维护版优化反复连接与分辨率调整时的稳定性。")
+                    .foregroundStyle(.secondary)
+            }
+
+            section("原作者") {
+                Text("AoyamaShou").font(.body.bold())
+                HStack(spacing: 8) {
+                    ForEach(AboutInfo.originalAuthor) { link in
                         Button { AboutInfo.open(link.url) } label: {
                             HStack(spacing: 5) {
                                 LinkIconView(icon: link.icon).frame(width: 16)
@@ -119,7 +147,7 @@ private struct AboutView: View {
             }
 
             section("声明") {
-                Text("本应用与 UU远程 及其开发商没有任何直接、间接或连带关系，仅为作者自己使用方便而开发。如果将来 UU远程 官方在 Mac 版中内置了同样的功能，删掉本应用即可。")
+                Text("本项目是 UUyc companion 的独立维护分支，与 UU远程 及其开发商没有关联。本应用仅用于改善远程显示体验；如果 UU远程 官方内置了同样的功能，可直接卸载本应用。")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -8,7 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="1.1.3"
+VERSION="1.1.4"
+# 对外发布标识包含 fork 维护者；macOS 标准版本字段使用纯数字。
+RELEASE_VERSION="${VERSION}-r0n9"
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"
 LEGACY_APP="/Applications/UUDisplay.app"   # 改名前的安装位置
@@ -50,6 +52,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>UUDisplayReleaseVersion</key><string>${RELEASE_VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
