@@ -11,7 +11,7 @@ import CoreGraphics
 import Foundation
 
 final class DisplayManager {
-    static let vendorID: UInt32 = 0x5555
+    static let vendorID = VirtualDisplayIdentityPool.vendorID
 
     // 目标状态
     private var desired: DeviceConfig?
@@ -27,6 +27,7 @@ final class DisplayManager {
     private var mainSet = false
     /// 换设备时的旧屏，等新屏成为主屏后释放
     private var retiring: [CGVirtualDisplay] = []
+    private var retiringConfig: DeviceConfig?
     /// 配置失败的虚拟屏，稳定后再释放（立即释放曾触发 WindowServer 崩溃）
     private var broken: [CGVirtualDisplay] = []
     /// 同一配置创建失败后不再重试，直到目标变化
@@ -40,26 +41,54 @@ final class DisplayManager {
     private var recovering = false
     private var waitOnlineTries = 0
     private var bornAt: [CGDirectDisplayID: Date] = [:]
+    private var displaySerials: [CGDirectDisplayID: UInt32] = [:]
+    private var identities: VirtualDisplayIdentityPool?
+    private var waitingForSlot = false
     private var releaseWaitStart: Date?
     /// WindowServer 显示配置无响应（事务超时）：停止建屏/删屏/改布局
     private(set) var wedged = false
     static let minLifetime: TimeInterval = 2.5
     private let cgQueue = DispatchQueue(label: "uudisplay.display-config")
+    typealias Scheduler = (TimeInterval, @escaping () -> Void) -> Void
+    private let identityURL: URL
+    private let markerURL: URL
+    private let now: () -> Date
+    private let schedule: Scheduler
+    private let onlineDisplayIDs: () -> [CGDirectDisplayID]?
 
-    private static let markerURL = ConfigStore.dir.appendingPathComponent("session.json")
+    init(identityURL: URL = ConfigStore.dir.appendingPathComponent("display-identities.json"),
+         markerURL: URL = ConfigStore.dir.appendingPathComponent("session.json"),
+         now: @escaping () -> Date = Date.init,
+         schedule: @escaping Scheduler = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+         },
+         onlineDisplayIDs: @escaping () -> [CGDirectDisplayID]? = DisplayManager.checkedOnlineDisplays) {
+        self.identityURL = identityURL
+        self.markerURL = markerURL
+        self.now = now
+        self.schedule = schedule
+        self.onlineDisplayIDs = onlineDisplayIDs
+    }
 
     var isActive: Bool { vd != nil }
+    var isSettled: Bool { !busy }
     var physicalOff: Bool { PhysicalDisplays.pending != nil }
 
     static func onlineDisplays() -> [CGDirectDisplayID] {
+        checkedOnlineDisplays() ?? []
+    }
+
+    private static func checkedOnlineDisplays() -> [CGDirectDisplayID]? {
         var count: UInt32 = 0
-        CGGetOnlineDisplayList(0, nil, &count)
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return nil }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        CGGetOnlineDisplayList(count, &ids, &count)
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return nil }
         return Array(ids.prefix(Int(count)))
     }
 
-    static func isVirtual(_ id: CGDirectDisplayID) -> Bool { CGDisplayVendorNumber(id) == vendorID }
+    static func isVirtual(_ id: CGDirectDisplayID) -> Bool {
+        CGDisplayVendorNumber(id) == vendorID
+    }
 
     private static func same(_ a: DeviceConfig?, _ b: DeviceConfig?) -> Bool {
         guard let a, let b else { return a == nil && b == nil }
@@ -95,7 +124,7 @@ final class DisplayManager {
 
     /// 启动时：读回上次未收尾的布局记录；残留的物理屏禁用记录由执行器按「目标=无」自动恢复
     func recoverIfNeeded() {
-        if let data = try? Data(contentsOf: DisplayManager.markerURL),
+        if let data = try? Data(contentsOf: markerURL),
            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: [Double]] {
             for (k, v) in dict where v.count == 2 {
                 if let id = UInt32(k) { savedOrigins[id] = CGPoint(x: v[0], y: v[1]) }
@@ -117,7 +146,7 @@ final class DisplayManager {
 
     /// 完成一步后等待 settle 秒再评估下一步
     private func finish(settle: TimeInterval) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
+        schedule(settle) { [weak self] in
             guard let self else { return }
             self.busy = false
             self.step()
@@ -125,12 +154,13 @@ final class DisplayManager {
     }
 
     /// 在 cgQueue 执行配置事务，回到主线程后进入稳定等待；事务超时则进入保护状态
-    private func runCG(settle: TimeInterval, _ work: @escaping () -> CGError) {
+    private func runCG(settle: TimeInterval, after: ((CGError) -> Void)? = nil, _ work: @escaping () -> CGError) {
         busy = true
         cgQueue.async {
             let err = work()
             DispatchQueue.main.async {
                 if err == .cannotComplete || err.rawValue == 1014 { self.enterWedged(err) }
+                after?(err)
                 self.finish(settle: settle)
             }
         }
@@ -143,16 +173,24 @@ final class DisplayManager {
     }
 
     /// 释放前确认每块屏已上线且存活足够久；最多等 8 秒
-    private func readyToRelease(_ displays: [CGVirtualDisplay]) -> Bool {
-        let online = Set(DisplayManager.onlineDisplays())
+    private func readyToRelease(_ displays: [CGVirtualDisplay], online: Set<CGDirectDisplayID>) -> Bool {
         let young = displays.contains { d in
-            !online.contains(d.displayID) || Date().timeIntervalSince(bornAt[d.displayID] ?? .distantPast) < DisplayManager.minLifetime
+            !online.contains(d.displayID) || now().timeIntervalSince(bornAt[d.displayID] ?? .distantPast) < DisplayManager.minLifetime
         }
         guard young else { releaseWaitStart = nil; return true }
-        let start = releaseWaitStart ?? Date()
+        let start = releaseWaitStart ?? now()
         releaseWaitStart = start
-        if Date().timeIntervalSince(start) > 8 { releaseWaitStart = nil; return true }
+        if now().timeIntervalSince(start) > 8 { releaseWaitStart = nil; return true }
         return false
+    }
+
+    private func rejectCurrentDisplay() {
+        failedCfg = current
+        if let failed = vd { broken.append(failed) }
+        vd = retiring.popLast()
+        current = retiringConfig
+        retiringConfig = nil
+        mainSet = vd != nil
     }
 
     private func step() {
@@ -164,9 +202,22 @@ final class DisplayManager {
             return
         }
 
+        // 断开或用户要求恢复时优先处理物理屏，不能被身份等待/失败回收挡住。
+        if physicalOff, desired == nil || recovering || physicalOverride || !shouldDisablePhysical() {
+            return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束或手动恢复") ? .success : .failure }
+        }
+
+        // 查询失败不能当作“全部离线”，否则可能重用系统仍占用的序列号。
+        guard let onlineIDs = onlineDisplayIDs() else {
+            busy = true
+            return finish(settle: 1)
+        }
+        let online = Set(onlineIDs)
+        identities?.reconcile(onlineDisplayIDs: online)
+
         // 1. 配置失败的屏：稳定后释放
         if !broken.isEmpty {
-            guard readyToRelease(broken) else { busy = true; return finish(settle: 0.5) }
+            guard readyToRelease(broken, online: online) else { busy = true; return finish(settle: 0.5) }
             busy = true
             release(&broken)
             return finish(settle: 1.5)
@@ -178,10 +229,11 @@ final class DisplayManager {
                 return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束") ? .success : .failure }
             }
             if vd != nil || !retiring.isEmpty {
-                guard readyToRelease(retiring + [vd].compactMap { $0 }) else { busy = true; return finish(settle: 0.5) }
+                guard readyToRelease(retiring + [vd].compactMap { $0 }, online: online) else { busy = true; return finish(settle: 0.5) }
                 busy = true
                 var all = retiring + [vd].compactMap { $0 }
                 retiring = []
+                retiringConfig = nil
                 vd = nil
                 current = nil
                 mainSet = false
@@ -189,10 +241,18 @@ final class DisplayManager {
                 return finish(settle: 1.5)
             }
             if !savedOrigins.isEmpty {
+                if identities?.hasPendingRemoval == true {
+                    busy = true
+                    return finish(settle: 0.5)
+                }
                 let origins = savedOrigins
                 savedOrigins = [:]
-                try? FileManager.default.removeItem(at: DisplayManager.markerURL)
+                try? FileManager.default.removeItem(at: markerURL)
                 return runCG(settle: 0.5) { DisplayManager.restoreOrigins(origins) }
+            }
+            if identities?.hasPendingRemoval == true {
+                busy = true
+                return finish(settle: 0.5)
             }
             if recovering {
                 recovering = false
@@ -206,37 +266,30 @@ final class DisplayManager {
             return
         }
 
-        // 目标=某设备的虚拟屏
-        if vd == nil || !DisplayManager.same(current, want) {
-            guard !DisplayManager.same(failedCfg, want) else { return }
-            busy = true
-            if let old = vd { retiring.append(old) }
-            vd = nil
-            current = nil
-            mainSet = false
-            waitOnlineTries = 0
-            if !createDisplay(want) { failedCfg = want }
-            return finish(settle: 1.0)
-        }
-
+        // 先完成已经开始的切换，避免连续配置变更累积第三块虚拟屏。
         if !mainSet, let id = vd?.displayID {
-            let online = DisplayManager.onlineDisplays()
             guard online.contains(id) else {
                 waitOnlineTries += 1
-                if waitOnlineTries > 20 { Log.info("⚠️ 虚拟屏 5 秒内未上线"); mainSet = true }
+                if waitOnlineTries > 20 {
+                    Log.info("⚠️ 虚拟屏 5 秒内未上线，保留旧屏并回收新屏")
+                    rejectCurrentDisplay()
+                }
                 busy = true
                 return finish(settle: 0.25)
             }
             if savedOrigins.isEmpty {
-                savedOrigins = Dictionary(uniqueKeysWithValues: online.filter { !DisplayManager.isVirtual($0) }
+                savedOrigins = Dictionary(uniqueKeysWithValues: onlineIDs.filter { !DisplayManager.isVirtual($0) }
                     .map { ($0, CGDisplayBounds($0).origin) })
             }
             writeMarker()
-            mainSet = true
-            return runCG(settle: 0.5) {
+            return runCG(settle: 0.5, after: { [weak self] error in
+                guard let self, !self.wedged else { return }
+                if error == .success { self.mainSet = true }
+                else { self.rejectCurrentDisplay() }
+            }) {
                 let err = applyDisplayConfig { cfg in
                     let t = CGDisplayBounds(id).origin
-                    for d in online {
+                    for d in onlineIDs {
                         let o = CGDisplayBounds(d).origin
                         CGConfigureDisplayOrigin(cfg, d, Int32(o.x - t.x), Int32(o.y - t.y))
                     }
@@ -247,15 +300,42 @@ final class DisplayManager {
         }
 
         if !retiring.isEmpty {
-            guard readyToRelease(retiring) else { busy = true; return finish(settle: 0.5) }
+            guard readyToRelease(retiring, online: online) else { busy = true; return finish(settle: 0.5) }
             busy = true
             release(&retiring)
+            retiringConfig = nil
             return finish(settle: 1.5)
+        }
+
+        // 目标变化时先预留空闲身份；失败和槽位不足都保留现有屏幕。
+        if (vd == nil || !DisplayManager.same(current, want)), !DisplayManager.same(failedCfg, want) {
+            do {
+                if identities == nil { identities = try VirtualDisplayIdentityPool(url: identityURL) }
+            } catch {
+                Log.info("❌ 无法读取或保存虚拟屏身份记录，停止建屏：\(error)")
+                failedCfg = want
+                return
+            }
+            let occupied = Set(onlineIDs.filter {
+                CGDisplayVendorNumber($0) == Self.vendorID && CGDisplayModelNumber($0) == VirtualDisplayIdentityPool.productID
+            }.map { CGDisplaySerialNumber($0) })
+            guard let serial = identities?.reserve(occupiedSerials: occupied) else {
+                if !waitingForSlot {
+                    Log.info("等待虚拟屏身份槽位释放；不会生成新的随机身份")
+                    waitingForSlot = true
+                }
+                busy = true
+                return finish(settle: 1.5)
+            }
+            waitingForSlot = false
+            busy = true
+            if !createDisplay(want, serial: serial) { failedCfg = want }
+            return finish(settle: 1.0)
         }
 
         let wantOff = shouldDisablePhysical() && !physicalOverride
         if wantOff, !physicalOff, let id = vd?.displayID {
-            let physical = DisplayManager.onlineDisplays().filter { !DisplayManager.isVirtual($0) }
+            let physical = onlineIDs.filter { !DisplayManager.isVirtual($0) }
             if !physical.isEmpty {
                 return runCG(settle: 1.5) {
                     let err = PhysicalDisplays.disable(physical)
@@ -271,45 +351,58 @@ final class DisplayManager {
 
     // MARK: - 单步操作
 
-    private func createDisplay(_ cfg: DeviceConfig) -> Bool {
+    private func createDisplay(_ cfg: DeviceConfig, serial: UInt32) -> Bool {
         let w = cfg.width, h = cfg.height
         let desc = CGVirtualDisplayDescriptor()
-        desc.name = "UUyc companion · \(cfg.name)"  // 显示在 UU 的多显示屏列表、系统显示器设置中
+        desc.name = "UUyc companion"  // 身份和名称都复用，不随连接设备变化
         desc.maxPixelsWide = UInt32(w)
         desc.maxPixelsHigh = UInt32(h)
         desc.sizeInMillimeters = CGSize(width: Double(w) / 220 * 25.4, height: Double(h) / 220 * 25.4)
         desc.vendorID = DisplayManager.vendorID
-        desc.productID = 0x0001
-        // 每次随机序列号：与残留虚拟屏同序列号时 CGVirtualDisplay 会返回 nil
-        desc.serialNum = UInt32.random(in: 1...0xFFFF_FFF0)
+        desc.productID = VirtualDisplayIdentityPool.productID
+        desc.serialNum = serial
 
         let created: CGVirtualDisplay? = autoreleasepool { CGVirtualDisplay(descriptor: desc) }
         guard let display = created else {
-            Log.info("❌ 创建虚拟屏失败（CGVirtualDisplay 返回 nil）")
+            identities?.cancelReservation(serial)
+            Log.info("❌ 创建虚拟屏失败（serial=\(serial)，CGVirtualDisplay 返回 nil），保留现有屏幕")
             return false
         }
+        displaySerials[display.displayID] = serial
+        bornAt[display.displayID] = now()
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = cfg.hiDPI
         let mw = cfg.hiDPI ? w / 2 : w, mh = cfg.hiDPI ? h / 2 : h
-        settings.modes = [CGVirtualDisplayMode(width: UInt(mw), height: UInt(mh), refreshRate: 60)]
-        guard autoreleasepool(invoking: { display.apply(settings) }) else {
-            Log.info("❌ 虚拟屏 applySettings 失败，稳定后释放")
-            bornAt[display.displayID] = Date()
+        guard let mode = CGVirtualDisplayMode(width: UInt(mw), height: UInt(mh), refreshRate: 60) else {
             broken.append(display)
             return false
         }
+        settings.modes = [mode]
+        guard autoreleasepool(invoking: { display.apply(settings) }) else {
+            Log.info("❌ 虚拟屏 applySettings 失败，稳定后释放")
+            broken.append(display)
+            return false
+        }
+        if let old = vd { retiring.append(old); retiringConfig = current }
         vd = display
         current = cfg
-        bornAt[display.displayID] = Date()
-        Log.info("✅ 已创建虚拟屏 #\(display.displayID) \(cfg.name) \(cfg.sizeLabel)")
+        mainSet = false
+        waitOnlineTries = 0
+        Log.info("✅ 已创建虚拟屏 #\(display.displayID) serial=\(serial) \(cfg.name) \(cfg.sizeLabel)")
         return true
     }
 
     private func release(_ displays: inout [CGVirtualDisplay]) {
         guard !displays.isEmpty else { return }
         let ids = displays.map { "#\($0.displayID)" }.joined(separator: " ")
+        for display in displays {
+            if let serial = displaySerials.removeValue(forKey: display.displayID) {
+                identities?.awaitRemoval(serial: serial, displayID: display.displayID)
+            }
+            bornAt[display.displayID] = nil
+        }
         autoreleasepool { displays.removeAll() }
-        Log.info("✅ 已移除虚拟屏 \(ids)")
+        Log.info("已释放虚拟屏对象 \(ids)，身份槽位等待系统确认离线；历史 ColorSync 记录不在此处清理")
     }
 
     private static func restoreOrigins(_ origins: [CGDirectDisplayID: CGPoint]) -> CGError {
@@ -325,6 +418,6 @@ final class DisplayManager {
 
     private func writeMarker() {
         let dict = Dictionary(uniqueKeysWithValues: savedOrigins.map { ("\($0.key)", [$0.value.x, $0.value.y]) })
-        try? JSONSerialization.data(withJSONObject: dict).write(to: DisplayManager.markerURL, options: .atomic)
+        try? JSONSerialization.data(withJSONObject: dict).write(to: markerURL, options: .atomic)
     }
 }
