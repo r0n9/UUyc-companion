@@ -231,10 +231,10 @@ xattr -dr com.apple.quarantine "/Applications/UUyc companion.app"
 
 ## 从源码构建
 
-需要 macOS 14 以上和 Xcode 命令行工具（Swift 6）：
+需要 macOS 14 以上和 Xcode 命令行工具（Swift 6.2 或更新版本）：
 
 ```bash
-git clone https://github.com/aoyamashou/UUyc-companion.git
+git clone https://github.com/r0n9/UUyc-companion.git
 ```
 
 ```bash
@@ -245,7 +245,11 @@ cd UUyc-companion && SIGN_IDENTITY=- scripts/build-app.sh
 
 - `SIGN_IDENTITY=-` 表示用 ad-hoc 签名。缺点是每次重新构建后，系统授权都会失效，需要重新授权。如果你有自己的代码签名证书，把 `-` 换成证书名称，升级后授权就能保留
 - 只装了命令行工具（没有完整 Xcode）也能构建：内置的 PermissionFlow 和 TourKit 已经把需要 Xcode 宏插件的写法改掉了，详见各自目录下的 `VENDORED.md`
-- 「关于」窗口依赖作者的私有模块 AboutKit，目前只有作者本人能从源码完整构建；直接下载 Releases 里的安装包即可正常使用
+- 「关于」窗口和 Debug 编号由本仓库实现；PermissionFlow 与 TourKit 已内置于 `Vendor/`，构建无需访问私有依赖仓库
+
+虚拟屏使用两个可复用的固定身份，避免每次连接或改尺寸都生成新的随机序列号。回归测试运行 `scripts/test-connection.sh`；旧版本 ColorSync 记录的审计、备份清理和回退方法见 [虚拟屏身份与 ColorSync 维护](docs/DISPLAY_IDENTITIES.md)。
+
+制作拖拽安装 DMG：运行 `SIGN_IDENTITY=- scripts/build-dmg.sh`，脚本会重新编译应用并生成 `dist/UUyc-companion-<版本号>.dmg`，包含应用、Applications 快捷入口和安装说明。
 
 <details>
 <summary><b>工作原理</b></summary>
