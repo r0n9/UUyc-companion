@@ -83,6 +83,12 @@ final class DisplayManager {
     }
 
     var isActive: Bool { vd != nil }
+    var activeDisplayID: CGDirectDisplayID? { vd?.displayID }
+    var canRetainForReconnect: Bool {
+        guard !busy, !wedged, !recovering, mainSet, let id = vd?.displayID,
+              retiring.isEmpty, broken.isEmpty, DisplayManager.same(current, desired) else { return false }
+        return onlineDisplayIDs()?.contains(id) == true
+    }
     var isSettled: Bool { !busy }
     var physicalOff: Bool { PhysicalDisplays.pending != nil }
 

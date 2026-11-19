@@ -49,14 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.setDisablePhysical = { [weak self] in self?.coordinator.setDisablePhysical($0) }
         settings.setPaused = { [weak self] in self?.coordinator.setPaused($0) }
         settings.restorePhysical = { [weak self] in self?.coordinator.restorePhysical() }
+        settings.beginAudioRecovery = { [weak self] in self?.coordinator.beginAudioRecovery() }
+        settings.audioRecoveryStatus = { [weak self] in self?.coordinator.audioRecoveryStatus ?? AudioRecoveryStatus() }
         settings.openTour = { [weak self] in self?.tour.show() }
         coordinator.onChange = { [weak self] in self?.statusBar?.refresh() }
         AboutPage.setUpDebugLabels()
-
-        // 心跳：看门狗据此判断主程序是否卡死（主线程定时器，卡住即停跳）
-        Heartbeat.beat(Heartbeat.appURL)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Heartbeat.beat(Heartbeat.appURL) }
-        installHotkey()
 
         let args = CommandLine.arguments
         // 调试：渲染设置窗口各面板后退出：--render-settings <目录>
@@ -96,6 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        // 渲染检查不覆盖正在运行实例的心跳，也不注册其全局恢复快捷键。
+        Heartbeat.beat(Heartbeat.appURL)
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Heartbeat.beat(Heartbeat.appURL) }
+        installHotkey()
+
         // 调试：直接走「授权」按钮背后的 PermissionFlow 调用（打开系统设置 + 拖拽面板）
         if args.contains("--demo-authorize") {
             let url = Bundle.main.bundleURL

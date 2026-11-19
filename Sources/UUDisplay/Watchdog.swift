@@ -60,8 +60,19 @@ enum Watchdog {
                         kill(pid, SIGKILL)
                     }
                     PhysicalDisplays.restore(reason: "看门狗：主程序\(appExists ? "卡死" : "不在")")
-                } else if let t = uuGoneSince, Date().timeIntervalSince(t) > uuGoneLimit {
-                    PhysicalDisplays.restore(reason: "看门狗：UU 已断开但物理屏未恢复")
+                } else {
+                    let lease = AudioReconnectLease.read(from: AudioReconnectWindow.markerURL)
+                    let displayOnline = lease.map {
+                        CGDisplayIsOnline($0.displayID) != 0 && CGDisplayVendorNumber($0.displayID) == VirtualDisplayIdentityPool.vendorID
+                    } ?? false
+                    let shouldRestore = WatchdogRecoveryPolicy.shouldRestore(
+                        appHealthy: appHealthy, appPID: hb?.pid,
+                        uuGoneFor: uuGoneSince.map { Date().timeIntervalSince($0) },
+                        lease: lease, heldDisplayOnline: displayOnline,
+                        uptime: ProcessInfo.processInfo.systemUptime, disconnectLimit: uuGoneLimit)
+                    if shouldRestore {
+                        PhysicalDisplays.restore(reason: "看门狗：UU 已断开但物理屏未恢复")
+                    }
                 }
             }
             Thread.sleep(forTimeInterval: interval)

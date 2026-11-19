@@ -47,6 +47,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let physical = action("远程时只保留虚拟屏", #selector(toggleDisablePhysical))
         physical.state = store.config.shouldDisablePhysical ? .on : .off
         menu.addItem(physical)
+        let audio = action("恢复远程声音（保留屏幕 15 秒）", #selector(recoverAudio))
+        audio.isEnabled = coordinator.audioRecoveryStatus.available
+        audio.toolTip = "点击后，在控制端断开，确认连接已关闭，再重新连接同一台 Mac。"
+        menu.addItem(audio)
         menu.addItem(action("设置…", #selector(reconfigure), key: ","))
         menu.addItem(.separator())
         menu.addItem(action("完全退出", #selector(quit), key: "q"))
@@ -62,6 +66,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func reconfigure() { openSettings(nil) }
 
     @objc private func toggleDisablePhysical() { coordinator.setDisablePhysical(!store.config.shouldDisablePhysical) }
+    @objc private func recoverAudio() { coordinator.beginAudioRecovery() }
 
     /// 与设置窗口的「完全退出」一致：停掉本次登录中的守护助手，再退出主程序
     @objc private func quit() {
