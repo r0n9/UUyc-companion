@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 构建「UUyc companion.app」（中文系统显示为「UU远程伴侣」，「UUDisplay Signing」证书签名）。
-# 用法：scripts/build-app.sh [--install]
+# 用法：scripts/build-app.sh [--install]；CI 可通过 VERSION / RELEASE_VERSION 传入标签版本。
 # 对外名称已改，内部标识保持不变：Bundle ID com.corndog.uudisplay（辅助功能授权按它识别）、
 # 可执行文件 UUDisplay / UUDisplayWatchdog、配置目录与日志文件名
 # 固定证书签名后，签名要求不随每次构建变化，升级后「辅助功能」等授权可保留（ad-hoc 签名每次都会失效）
@@ -8,9 +8,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="1.1.4"
+VERSION="${VERSION:-1.1.4}"
 # 对外发布标识包含 fork 维护者；macOS 标准版本字段使用纯数字。
-RELEASE_VERSION="${VERSION}-r0n9"
+RELEASE_VERSION="${RELEASE_VERSION:-${VERSION}-r0n9}"
+if [[ ! "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+      ! "$RELEASE_VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' ||
+      "${RELEASE_VERSION%%[-+]*}" != "$VERSION" ]]; then
+  echo '❌ VERSION 必须是 x.y.z，RELEASE_VERSION 必须使用同一版本，可附加维护者、预发布或构建标识' >&2
+  exit 2
+fi
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"
 LEGACY_APP="/Applications/UUDisplay.app"   # 改名前的安装位置

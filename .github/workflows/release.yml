@@ -1,0 +1,108 @@
+name: Release macOS app
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Apple Silicon release
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      SIGN_IDENTITY: "-"
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read version from tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version_pattern='^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if [[ ! "$RELEASE_TAG" =~ $version_pattern ]]; then
+            printf 'Invalid release tag: %s. Expected vX.Y.Z, optionally with a suffix.\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          {
+            printf 'VERSION=%s\n' "$version"
+            printf 'RELEASE_VERSION=%s\n' "${RELEASE_TAG#v}"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify build toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          swift --version
+
+      - name: Run regressions
+        run: scripts/test-connection.sh
+
+      - name: Build release app and DMG
+        run: scripts/build-dmg.sh
+
+      - name: Archive app and checksum
+        run: |
+          archive="UUyc-companion-${RELEASE_VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "build/UUyc companion.app" "dist/$archive"
+          (
+            cd dist
+            shasum -a 256 "$archive" > "$archive.sha256"
+          )
+
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: UUyc-companion-${{ github.ref_name }}-arm64
+          if-no-files-found: error
+          path: |
+            dist/UUyc-companion-${{ env.RELEASE_VERSION }}.dmg
+            dist/UUyc-companion-${{ env.RELEASE_VERSION }}.dmg.sha256
+            dist/UUyc-companion-${{ env.RELEASE_VERSION }}.zip
+            dist/UUyc-companion-${{ env.RELEASE_VERSION }}.zip.sha256
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          artifacts=(
+            "dist/UUyc-companion-${RELEASE_VERSION}.dmg"
+            "dist/UUyc-companion-${RELEASE_VERSION}.dmg.sha256"
+            "dist/UUyc-companion-${RELEASE_VERSION}.zip"
+            "dist/UUyc-companion-${RELEASE_VERSION}.zip.sha256"
+          )
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "${artifacts[@]}" --clobber
+          else
+            release_flags=()
+            case "${RELEASE_VERSION#"$VERSION"}" in
+              -alpha*|-beta*|-rc*) release_flags+=(--prerelease) ;;
+            esac
+            gh release create "$tag" "${artifacts[@]}" \
+              --verify-tag \
+              --title "UUyc companion $RELEASE_VERSION" \
+              --generate-notes \
+              --notes "Apple Silicon · macOS 14+. 此构建使用临时（ad-hoc）签名，未经过 Apple 公证。安装与授权说明见仓库 README。" \
+              "${release_flags[@]}"
+          fi

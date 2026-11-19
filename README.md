@@ -278,6 +278,21 @@ cd UUyc-companion && SIGN_IDENTITY=- scripts/build-app.sh
 
 对外版本号与 DMG 文件名使用 `1.1.4-r0n9`；macOS 标准 `CFBundleShortVersionString` 和 `CFBundleVersion` 使用 `1.1.4`，完整发布标识保存在 `UUDisplayReleaseVersion` 并显示于“关于”窗口。
 
+### 标签自动发布
+
+推送新的 `v*` 标签会触发 [Release macOS app](.github/workflows/release.yml)，在 Apple Silicon macOS 15 runner 上使用 Xcode 26.2 运行回归测试、构建 Release 应用并生成 DMG，然后创建对应的 GitHub Release。标签须采用 `vX.Y.Z` 格式，可附加维护者或预发布标识，例如 `v1.1.5-r0n9`；`-alpha`、`-beta`、`-rc` 会标记为预发布。
+
+```sh
+git tag v1.1.5-r0n9
+git push origin v1.1.5-r0n9
+```
+
+发布附件包含应用 `.zip`、拖拽安装 `.dmg` 及各自的 `.sha256` 校验文件；Actions 页面也保存构建产物。应用与安装包版本取自标签，`v1.1.5-r0n9` 会得到标准版本 `1.1.5` 和发布标识 `1.1.5-r0n9`。重复运行同一标签会更新其附件。
+
+工作流使用仓库自带的 `GITHUB_TOKEN` 发布，已声明 `contents: write` 权限，无需额外 secret。产物使用 ad-hoc 签名、未经过 Apple 公证，安装和升级时可能需要重新授予辅助功能权限。此自动发布当前仅生成 Apple Silicon 版本。
+
+本地打包也可传入版本：`VERSION=1.1.5 RELEASE_VERSION=1.1.5-r0n9 SIGN_IDENTITY=- scripts/build-dmg.sh`；未传入时仍使用脚本默认版本。
+
 <details>
 <summary><b>工作原理</b></summary>
 
