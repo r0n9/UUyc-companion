@@ -99,8 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let model = PermissionsModel()
             if ProcessInfo.processInfo.environment["UUDISPLAY_RENDER_PENDING"] == "1" {
                 model.axGranted = false
+            } else if ProcessInfo.processInfo.environment["UUDISPLAY_RENDER_GRANTED"] == "1" {
+                model.axGranted = true
             }
-            let view = NSHostingView(rootView: PermissionsView(model: model) {})
+            let view = NSHostingView(rootView: PermissionsView(model: model) {}
+                .environment(\.colorScheme, .light)
+                .background(Color(nsColor: .windowBackgroundColor)))
+            view.appearance = NSAppearance(named: .aqua)
             view.frame = NSRect(origin: .zero, size: view.fittingSize)
             view.layoutSubtreeIfNeeded()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

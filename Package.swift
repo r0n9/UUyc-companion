@@ -15,6 +15,7 @@ let package = Package(
         .executableTarget(name: "vdprobe", dependencies: ["CGVirtualDisplayBridge"]),
         .executableTarget(name: "uuprobe"),
         .executableTarget(name: "uuwatch"),
+        .executableTarget(name: "audioprobe"),
         .executableTarget(name: "UUDisplay", dependencies: [
             "CGVirtualDisplayBridge",
             .product(name: "PermissionFlow", package: "PermissionFlow"),

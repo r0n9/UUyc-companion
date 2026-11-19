@@ -41,6 +41,32 @@ private struct StatusBadge: View {
     }
 }
 
+private struct PermissionUpgradeNotice: View {
+    let granted: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("升级后可能需要重新授权", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline).foregroundStyle(.orange)
+            if granted {
+                Text("当前已授权。以后覆盖安装新版后，若这里显示「未授权」，请在系统设置中删除旧的伴侣条目，再添加新版应用并开启开关。")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("即使系统设置里的开关已经开启，升级后仍可能是旧授权。请以本窗口的「已授权」状态为准。")
+                    .font(.callout.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                Text("1. 点下方「授权」，在权限列表中选中旧的伴侣条目，点「−」删除。\n2. 将新版伴侣重新加入列表，开启开关，再回到这里确认「已授权」。")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                Text("首次安装且没有旧条目时，可直接添加。若仍未生效，请退出伴侣，再从「应用程序」打开新版。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.5), lineWidth: 1))
+    }
+}
+
 private struct PermissionCard<Action: View>: View {
     let icon: String
     let title: Text
@@ -93,6 +119,8 @@ struct PermissionsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            PermissionUpgradeNotice(granted: model.axGranted)
+
             PermissionCard(
                 icon: "hand.raised.fill",
                 // macOS 27 起叫「设备控制和数据访问」，更早为「辅助功能」；固定取简体中文
@@ -103,7 +131,7 @@ struct PermissionsView: View {
                 ok: model.axGranted,
                 okText: "已授权",
                 pendingText: "未授权",
-                tip: "点「授权」会打开系统设置，旁边会出现一个小窗口，把里面的 UU远程伴侣 拖进列表就好。\n如果列表里已经有 UU远程伴侣，开关也开着，却还是显示未授权：先选中它，点「−」删掉，再拖一次。"
+                tip: "点「授权」会打开系统设置，旁边会出现一个小窗口，把里面的 UU远程伴侣 拖进列表并开启开关。旧条目也可能显示为 UUyc companion 或 UUDisplay。"
             ) {
                 PermissionFlowButton(
                     pane: .accessibility,

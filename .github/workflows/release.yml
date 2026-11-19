@@ -92,8 +92,43 @@ jobs:
             "dist/UUyc-companion-${RELEASE_VERSION}.zip"
             "dist/UUyc-companion-${RELEASE_VERSION}.zip.sha256"
           )
+          release_notes_file="$RUNNER_TEMP/uuyc-release-notes.md"
+          cat > "$release_notes_file" <<'NOTES'
+          <!-- uuyc-upgrade-permissions:start -->
+          > [!WARNING]
+          > **升级用户请先看：覆盖安装后可能需要重新授权！**
+          >
+          > **系统设置中的开关已开启，也可能只是旧授权。** 如果伴侣显示「未授权」，请删除旧条目，再添加新版应用：
+          >
+          > 1. 打开「系统设置 › 隐私与安全性 › 辅助功能」（macOS 27 中叫「设备控制和数据访问」）。
+          > 2. 选中旧的 UU远程伴侣 / UUyc companion / UUDisplay 条目，点击「−」删除。
+          > 3. 重新添加「应用程序」中的新版 `UUyc companion.app`，开启开关。
+          > 4. 回到伴侣的「权限设置」，确认 **「已授权」**；若仍未生效，退出后从「应用程序」重新打开。
+          >
+          > 首次安装或没有旧条目时可直接添加。已显示「已授权」时无需重复操作。
+
+          Apple Silicon · macOS 14+。此构建使用临时（ad-hoc）签名，未经过 Apple 公证。首次打开若被系统阻止，请在「系统设置 › 隐私与安全性」中选择「仍要打开」。完整安装说明见仓库 README 和 DMG 中的「安装说明.txt」。
+          <!-- uuyc-upgrade-permissions:end -->
+          NOTES
           if gh release view "$tag" > /dev/null 2>&1; then
+            previous_notes_file="$RUNNER_TEMP/uuyc-previous-release-notes.md"
+            gh release view "$tag" --json body --jq .body > "$previous_notes_file"
+            # 重跑时将提醒放在最前面，保留原更新记录，避免重复插入同一提醒。
+            python3 - "$release_notes_file" "$previous_notes_file" <<'PY'
+          from pathlib import Path
+          import sys
+          current, previous = map(Path, sys.argv[1:])
+          header = current.read_text()
+          start, end = "<!-- uuyc-upgrade-permissions:start -->", "<!-- uuyc-upgrade-permissions:end -->"
+          old = previous.read_text()
+          if start in old and end in old.split(start, 1)[1]:
+              before, rest = old.split(start, 1)
+              _, after = rest.split(end, 1)
+              old = before + after
+          current.write_text(header.rstrip() + ("\n\n" + old.strip() if old.strip() else "") + "\n")
+          PY
             gh release upload "$tag" "${artifacts[@]}" --clobber
+            gh release edit "$tag" --notes-file "$release_notes_file"
           else
             release_flags=()
             case "${RELEASE_VERSION#"$VERSION"}" in
@@ -103,6 +138,6 @@ jobs:
               --verify-tag \
               --title "UUyc companion $RELEASE_VERSION" \
               --generate-notes \
-              --notes "Apple Silicon · macOS 14+. 此构建使用临时（ad-hoc）签名，未经过 Apple 公证。安装与授权说明见仓库 README。" \
+              --notes-file "$release_notes_file" \
               "${release_flags[@]}"
           fi
