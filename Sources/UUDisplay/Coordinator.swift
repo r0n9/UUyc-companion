@@ -130,7 +130,6 @@ final class Coordinator {
             return "剩余 \(audioReconnect.remainingSeconds) 秒 · \(instruction)"
         }
         if let audioRecoveryError { return "⚠️ \(audioRecoveryError)" }
-        if let audioRecoveryNotice { return audioRecoveryNotice }
         guard connected else { return "等待其它设备连接中" }
         let who = controllerName ?? "未知设备"
         if let c = display.current, display.isActive {
