@@ -21,6 +21,7 @@ final class Coordinator {
     var connected: Bool { monitor.connected || simulatedName != nil }
 
     func start() {
+        display.onChange = { [weak self] in self?.onChange?() }
         display.shouldDisablePhysical = { [weak self] in self?.physicalDisableAllowed ?? false }
         display.recoverIfNeeded()
         monitor.onConnect = { [weak self] in self?.handleConnect() }
@@ -34,7 +35,8 @@ final class Coordinator {
     }
 
     var statusText: String {
-        if display.wedged { return "⛔️ 屏幕设置无响应，请重启 Mac" }
+        if display.recoveryNeedsRestart { return "⚠️ 屏幕调整反复失败，请退出并重新打开应用" }
+        if display.wedged { return "⚠️ 屏幕调整已暂停，正在等待系统恢复" }
         if store.config.paused { return "虚拟屏已暂停：连接时不做调整" }
         guard connected else { return "等待其它设备连接中" }
         let who = controllerName ?? "未知设备"

@@ -2,8 +2,8 @@
 // 调用方只声明「应该是什么样」（desired），执行器一次只做一步拓扑变化，每步之后等待系统稳定再做下一步。
 // 原因（实测）：重新启用物理屏的热插拔事件尚未处理完时又新建虚拟屏，applySettings 失败，
 //              随后 WindowServer 在 GenerateModeListForDisplay 中 abort，系统注销重启。
-//      另：虚拟屏创建后约 1 秒、尚未完全上线时就释放，会让 WindowServer 显示配置卡死（所有事务 10 秒超时，
-//      需重启恢复），因此释放前必须已上线且存活 ≥ 2.5 秒；一旦检测到超时即进入保护状态，不再做拓扑变化。
+//      另：虚拟屏创建后约 1 秒、尚未完全上线时就释放，会让 WindowServer 显示配置卡死（所有事务 10 秒超时），
+//      因此释放前必须已上线且存活 ≥ 2.5 秒；超时后暂停拓扑变化，配置服务连续响应后再恢复。
 // 其他要点：虚拟屏只给一个模式且不改；GUI 主线程不能调 CGCompleteDisplayConfiguration（放 cgQueue）；
 //          物理屏是否被禁用以磁盘记录为准（看门狗可能在别的进程里已恢复）。
 import CGVirtualDisplayBridge
@@ -18,6 +18,8 @@ final class DisplayManager {
     private var shutdownCompletion: (() -> Void)?
     /// 是否应禁用物理屏（由 Coordinator 按设置与看门狗状态决定）
     var shouldDisablePhysical: () -> Bool = { false }
+    /// 异步显示状态变化时刷新菜单栏
+    var onChange: (() -> Void)?
     /// 用户手动恢复后，本次连接内不再禁用
     private var physicalOverride = false
 
@@ -45,8 +47,18 @@ final class DisplayManager {
     private var identities: VirtualDisplayIdentityPool?
     private var waitingForSlot = false
     private var releaseWaitStart: Date?
+    private var shutdownFinished = false
+    private var layoutRestoreRetryAt = Date.distantPast
     /// WindowServer 显示配置无响应（事务超时）：停止建屏/删屏/改布局
     private(set) var wedged = false
+    private var retryAt: Date?
+    private var retryGeneration = 0
+    private var automaticRecoveryAttempts = 0
+    private(set) var recoveryNeedsRestart = false
+    private var nextHealthCheckAt = Date.distantPast
+    private var nextPhysicalRestoreAt = Date.distantPast
+    private var healthCheckDelay: TimeInterval = 30
+    private var healthCheckSuccesses = 0
     static let minLifetime: TimeInterval = 2.5
     private let cgQueue = DispatchQueue(label: "uudisplay.display-config")
     typealias Scheduler = (TimeInterval, @escaping () -> Void) -> Void
@@ -101,6 +113,7 @@ final class DisplayManager {
     // MARK: - 对外接口：只改目标状态
 
     func create(_ cfg: DeviceConfig) {
+        shutdownFinished = false
         if !DisplayManager.same(desired, cfg) { failedCfg = nil }
         desired = cfg
         kick()
@@ -110,6 +123,7 @@ final class DisplayManager {
         desired = nil
         failedCfg = nil
         physicalOverride = false
+        nextPhysicalRestoreAt = .distantPast
         if let completion { shutdownCompletion = completion }
         kick()
     }
@@ -119,6 +133,7 @@ final class DisplayManager {
     /// 快捷键 / 菜单 / 关闭开关：立即恢复物理屏，虚拟屏保留
     func restorePhysicalNow(override: Bool = true) {
         if override { physicalOverride = true }
+        nextPhysicalRestoreAt = .distantPast
         kick()
     }
 
@@ -150,6 +165,7 @@ final class DisplayManager {
             guard let self else { return }
             self.busy = false
             self.step()
+            self.onChange?()
         }
     }
 
@@ -169,7 +185,77 @@ final class DisplayManager {
     private func enterWedged(_ err: CGError) {
         guard !wedged else { return }
         wedged = true
-        Log.info("⛔️ WindowServer 显示配置无响应（CGError=\(err.rawValue)），停止一切显示操作；请注销或重启 Mac 恢复")
+        healthCheckDelay = 30
+        healthCheckSuccesses = 0
+        nextHealthCheckAt = now().addingTimeInterval(healthCheckDelay)
+        nextPhysicalRestoreAt = .distantPast
+        recoveryNeedsRestart = automaticRecoveryAttempts >= 2
+        Log.info("⛔️ 显示配置超时（CGError=\(err.rawValue)），暂停屏幕调整；稍后检查系统是否恢复")
+        if recoveryNeedsRestart {
+            Log.info("自动恢复后屏幕调整再次超时，停止继续自动恢复；请退出并重新打开应用，持续失败时再注销或重启 Mac")
+        }
+        onChange?()
+    }
+
+    /// 长时间等待不占用 busy，手动恢复物理屏和退出仍可立即处理。
+    private func scheduleRetry(at date: Date) {
+        // 新目标需要更早检查时替换原计时，旧回调通过代次失效。
+        if let retryAt, retryAt <= date { return }
+        retryAt = date
+        retryGeneration += 1
+        let generation = retryGeneration
+        schedule(max(0, date.timeIntervalSince(now()))) { [weak self] in
+            guard let self, self.retryGeneration == generation else { return }
+            self.retryAt = nil
+            self.kick()
+        }
+    }
+
+    private func stepProtected() {
+        if physicalOff {
+            guard now() >= nextPhysicalRestoreAt else {
+                return scheduleRetry(at: nextPhysicalRestoreAt)
+            }
+            return runCG(settle: 1.5, after: { [weak self] error in
+                guard let self else { return }
+                if error != .success {
+                    self.healthCheckSuccesses = 0
+                    self.nextPhysicalRestoreAt = self.now().addingTimeInterval(self.healthCheckDelay)
+                    self.healthCheckDelay = min(self.healthCheckDelay * 2, 300)
+                }
+            }) { PhysicalDisplays.restore(reason: "保护状态") }
+        }
+        if let done = shutdownCompletion {
+            shutdownCompletion = nil
+            shutdownFinished = true
+            done()
+            return
+        }
+        guard !recoveryNeedsRestart else { return }
+        guard now() >= nextHealthCheckAt else {
+            return scheduleRetry(at: nextHealthCheckAt)
+        }
+        return runCG(settle: 1.5, after: { [weak self] error in
+            guard let self else { return }
+            if error == .success {
+                self.healthCheckSuccesses += 1
+                if self.healthCheckSuccesses >= 2 {
+                    self.automaticRecoveryAttempts += 1
+                    self.wedged = false
+                    self.recovering = true
+                    self.failedCfg = nil
+                    Log.info("✅ 显示配置服务连续两次响应，先恢复残留布局，再应用当前连接配置")
+                    self.onChange?()
+                } else {
+                    self.nextHealthCheckAt = self.now().addingTimeInterval(5)
+                }
+            } else {
+                self.healthCheckSuccesses = 0
+                self.healthCheckDelay = min(self.healthCheckDelay * 2, 300)
+                self.nextHealthCheckAt = self.now().addingTimeInterval(self.healthCheckDelay)
+                Log.info("显示配置服务尚未恢复（CGError=\(error.rawValue)），\(Int(self.healthCheckDelay)) 秒后再检查；持续无响应可注销或重启 Mac")
+            }
+        }) { DisplayManager.checkConfigurationResponse() }
     }
 
     /// 释放前确认每块屏已上线且存活足够久；最多等 8 秒
@@ -194,17 +280,12 @@ final class DisplayManager {
     }
 
     private func step() {
-        guard !busy else { return }
-        if wedged {
-            // 保护状态：只尝试恢复物理屏，其余全部停止
-            if physicalOff { return runCG(settle: 3) { PhysicalDisplays.restore(reason: "保护状态") ? .success : .failure } }
-            if let done = shutdownCompletion { shutdownCompletion = nil; done() }
-            return
-        }
+        guard !busy, !shutdownFinished else { return }
+        if wedged { return stepProtected() }
 
         // 断开或用户要求恢复时优先处理物理屏，不能被身份等待/失败回收挡住。
         if physicalOff, desired == nil || recovering || physicalOverride || !shouldDisablePhysical() {
-            return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束或手动恢复") ? .success : .failure }
+            return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束或手动恢复") }
         }
 
         // 查询失败不能当作“全部离线”，否则可能重用系统仍占用的序列号。
@@ -226,7 +307,7 @@ final class DisplayManager {
         guard let want = recovering ? nil : desired else {
             // 目标=无：恢复物理屏 → 释放虚拟屏 → 还原布局
             if physicalOff {
-                return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束") ? .success : .failure }
+                return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "远程结束") }
             }
             if vd != nil || !retiring.isEmpty {
                 guard readyToRelease(retiring + [vd].compactMap { $0 }, online: online) else { busy = true; return finish(settle: 0.5) }
@@ -245,10 +326,19 @@ final class DisplayManager {
                     busy = true
                     return finish(settle: 0.5)
                 }
+                if now() < layoutRestoreRetryAt {
+                    return scheduleRetry(at: layoutRestoreRetryAt)
+                }
                 let origins = savedOrigins
-                savedOrigins = [:]
-                try? FileManager.default.removeItem(at: markerURL)
-                return runCG(settle: 0.5) { DisplayManager.restoreOrigins(origins) }
+                return runCG(settle: 0.5, after: { [weak self] error in
+                    guard let self else { return }
+                    if error == .success {
+                        self.savedOrigins = [:]
+                        try? FileManager.default.removeItem(at: self.markerURL)
+                    } else {
+                        self.layoutRestoreRetryAt = self.now().addingTimeInterval(5)
+                    }
+                }) { DisplayManager.restoreOrigins(origins) }
             }
             if identities?.hasPendingRemoval == true {
                 busy = true
@@ -259,8 +349,10 @@ final class DisplayManager {
                 Log.info("残留状态已恢复")
                 if desired != nil { return step() }
             }
+            automaticRecoveryAttempts = 0
             if let done = shutdownCompletion {
                 shutdownCompletion = nil
+                shutdownFinished = true
                 done()
             }
             return
@@ -291,8 +383,10 @@ final class DisplayManager {
                     let t = CGDisplayBounds(id).origin
                     for d in onlineIDs {
                         let o = CGDisplayBounds(d).origin
-                        CGConfigureDisplayOrigin(cfg, d, Int32(o.x - t.x), Int32(o.y - t.y))
+                        let error = CGConfigureDisplayOrigin(cfg, d, Int32(o.x - t.x), Int32(o.y - t.y))
+                        if error != .success { return error }
                     }
+                    return .success
                 }
                 Log.info(err == .success ? "✅ 虚拟屏已设为主屏" : "⚠️ 设主屏失败 CGError=\(err.rawValue)")
                 return err
@@ -345,8 +439,10 @@ final class DisplayManager {
             }
         }
         if !wantOff, physicalOff {
-            return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "手动恢复") ? .success : .failure }
+            return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "手动恢复") }
         }
+        // 完整切屏流程收敛后，才把本次连续故障计数清零。
+        if mainSet, DisplayManager.same(current, want) { automaticRecoveryAttempts = 0 }
     }
 
     // MARK: - 单步操作
@@ -405,12 +501,31 @@ final class DisplayManager {
         Log.info("已释放虚拟屏对象 \(ids)，身份槽位等待系统确认离线；历史 ColorSync 记录不在此处清理")
     }
 
+    /// 空事务可能直接返回成功，必须提交当前原点才能检查实际的显示配置服务。
+    /// 不创建屏幕、不切换模式；仅在保护状态下从 cgQueue 调用。
+    private static func checkConfigurationResponse() -> CGError {
+        guard let online = checkedOnlineDisplays(), !online.isEmpty else { return .failure }
+        return applyDisplayConfig { cfg in
+            for id in online {
+                let origin = CGDisplayBounds(id).origin
+                let error = CGConfigureDisplayOrigin(cfg, id, Int32(origin.x), Int32(origin.y))
+                if error != .success { return error }
+            }
+            return .success
+        }
+    }
+
     private static func restoreOrigins(_ origins: [CGDirectDisplayID: CGPoint]) -> CGError {
-        let online = Set(onlineDisplays())
-        let targets = origins.filter { online.contains($0.key) }
+        guard let onlineIDs = checkedOnlineDisplays() else { return .failure }
+        let online = Set(onlineIDs)
+        let targets = origins.filter { online.contains($0.key) && CGDisplayBounds($0.key).origin != $0.value }
         guard !targets.isEmpty else { return .success }
         let err = applyDisplayConfig { cfg in
-            for (id, o) in targets { CGConfigureDisplayOrigin(cfg, id, Int32(o.x), Int32(o.y)) }
+            for (id, o) in targets {
+                let error = CGConfigureDisplayOrigin(cfg, id, Int32(o.x), Int32(o.y))
+                if error != .success { return error }
+            }
+            return .success
         }
         Log.info(err == .success ? "✅ 已还原显示器布局" : "⚠️ 还原布局 CGError=\(err.rawValue)")
         return err

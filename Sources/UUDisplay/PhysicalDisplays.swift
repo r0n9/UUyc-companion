@@ -8,10 +8,15 @@ import Foundation
 
 /// 同步执行一次显示器配置事务。GUI 进程中不可在主线程调用（会与自身重配置通知死锁）
 @discardableResult
-func applyDisplayConfig(_ body: (CGDisplayConfigRef?) -> Void) -> CGError {
+func applyDisplayConfig(_ body: (CGDisplayConfigRef?) -> CGError) -> CGError {
     var cfg: CGDisplayConfigRef?
-    guard CGBeginDisplayConfiguration(&cfg) == .success else { return .failure }
-    body(cfg)
+    let begin = CGBeginDisplayConfiguration(&cfg)
+    guard begin == .success else { return begin }
+    let configure = body(cfg)
+    guard configure == .success else {
+        CGCancelDisplayConfiguration(cfg)
+        return configure
+    }
     let err = CGCompleteDisplayConfiguration(cfg, .forSession)
     if err != .success { CGCancelDisplayConfiguration(cfg) }
     return err
@@ -41,21 +46,33 @@ enum PhysicalDisplays {
             Log.info("❌ 无法写入物理屏记录，放弃禁用")
             return .failure
         }
-        return applyDisplayConfig { cfg in ids.forEach { _ = setEnabled(cfg, $0, false) } }
+        return applyDisplayConfig { cfg in
+            for id in ids {
+                let error = setEnabled(cfg, id, false)
+                if error != .success { return error }
+            }
+            return .success
+        }
     }
 
     /// 按记录重新启用物理屏；成功后删除记录。可在任意进程调用，重复调用无害
     @discardableResult
-    static func restore(reason: String) -> Bool {
-        guard let ids = pending else { return true }
-        guard let setEnabled else { return false }
-        let err = applyDisplayConfig { cfg in ids.forEach { _ = setEnabled(cfg, $0, true) } }
+    static func restore(reason: String) -> CGError {
+        guard let ids = pending else { return .success }
+        guard let setEnabled else { return .failure }
+        let err = applyDisplayConfig { cfg in
+            for id in ids {
+                let error = setEnabled(cfg, id, true)
+                if error != .success { return error }
+            }
+            return .success
+        }
         if err == .success {
             try? FileManager.default.removeItem(at: markerURL)
             Log.info("✅ 已恢复物理屏 \(ids)（\(reason)）")
-            return true
+            return .success
         }
         Log.info("⚠️ 恢复物理屏失败 CGError=\(err.rawValue)（\(reason)），稍后重试")
-        return false
+        return err
     }
 }
