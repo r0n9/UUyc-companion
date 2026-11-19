@@ -25,6 +25,15 @@ final class ConfigStore {
 }
 enum PhysicalDisplays { static var available = true }
 enum Log { static func info(_ message: String) {} }
+final class AudioCaptureMonitor {
+    var status = AudioCaptureStatus()
+    var onChange: (() -> Void)?
+    var refreshes = 0
+    func refresh() { refreshes += 1 }
+    func updateContext(connected: Bool, displayID: UInt32?, onlyVirtual: Bool) {
+        status = AudioCaptureStatus(kind: !connected ? .disconnected : (onlyVirtual ? .unknown : .physicalScreens))
+    }
+}
 enum UUReader {
     static var isTrusted = true
     static var names: [String]?
@@ -50,6 +59,7 @@ final class DisplayManager {
     var removals = 0
     var isActive: Bool { current != nil }
     var canRetainForReconnect: Bool { isActive && isSettled && !wedged }
+    var onlyVirtualDisplaysOnline: Bool { isActive && physicalOff }
     func recoverIfNeeded() {}
     func matches(_ cfg: DeviceConfig) -> Bool {
         current?.width == cfg.width && current?.height == cfg.height && current?.hiDPI == cfg.hiDPI
@@ -136,8 +146,66 @@ private final class Fixture {
         normal.disconnect()
         precondition(normal.coordinator.display.removals == 1 && !normal.coordinator.display.isActive)
 
+        // 查看和重复打开均不计时；开始后模型继续存在并更新步骤。
+        let cancelledGuide = try Fixture(directory: root)
+        cancelledGuide.coordinator.requestAudioRecovery()
+        cancelledGuide.clock.advance(20)
+        precondition(!cancelledGuide.window.isArmed && cancelledGuide.coordinator.display.removals == 0)
+        let guideClock = Clock()
+        let guideMarker = root.appendingPathComponent("guide-lease.json")
+        let guideWindow = AudioReconnectWindow(url: guideMarker, pid: 123, now: { guideClock.uptime },
+            schedule: { delay, work in guideClock.tasks.append((guideClock.uptime + delay, work)) })
+        let guideCapture = AudioCaptureMonitor()
+        let guideCoordinator = Coordinator(audioReconnect: guideWindow, audioCapture: guideCapture)
+        var guideModel: AudioRecoveryGuideModel?
+        guideCoordinator.onShowAudioRecovery = {
+            if guideModel == nil {
+                guideModel = AudioRecoveryGuideModel(
+                    recoveryStatus: { guideCoordinator.audioRecoveryStatus },
+                    captureStatus: { guideCoordinator.audioCaptureStatus },
+                    onStart: { guideCoordinator.beginAudioRecovery() },
+                    onStop: { guideCoordinator.stopAudioRecovery() },
+                    onRefresh: { guideCoordinator.refreshAudioCapture() })
+            }
+        }
+        guideCoordinator.start()
+        guideCoordinator.simulatedName = "iPad"
+        guideCoordinator.handleConnect()
+        guideCoordinator.requestAudioRecovery()
+        guideClock.advance(40)
+        precondition(!guideWindow.isArmed && !FileManager.default.fileExists(atPath: guideMarker.path))
+        guideModel?.startRecovery()
+        precondition(guideWindow.remainingSeconds == 15 && guideWindow.lease?.startedAt == 140)
+        let originalModel = guideModel
+        guideCoordinator.requestAudioRecovery()
+        precondition(guideModel === originalModel && guideWindow.remainingSeconds == 15)
+        guideClock.advance(2)
+        guideModel?.refresh()
+        precondition(guideModel?.recovery.remainingSeconds == 13 && guideModel?.recovery.activeStep == 0)
+        guideCapture.status = AudioCaptureStatus(kind: .suspected)
+        guideModel?.refresh()
+        precondition(guideModel?.capture.kind == .suspected)
+        guideModel?.refreshCapture()
+        precondition(guideCapture.refreshes == 1)
+        guideModel?.stopRecovery()
+        precondition(!guideWindow.isArmed && guideModel?.recovery.outcome == .cancelled)
+        guideCoordinator.shutdown {}
+        let changedDuringGuide = Coordinator(audioReconnect: guideWindow)
+        changedDuringGuide.start()
+        changedDuringGuide.simulatedName = "iPad"
+        changedDuringGuide.handleConnect()
+        let changedModel = AudioRecoveryGuideModel(
+            recoveryStatus: { changedDuringGuide.audioRecoveryStatus }, captureStatus: { AudioCaptureStatus() },
+            onStart: { changedDuringGuide.beginAudioRecovery() }, onStop: {}, onRefresh: {})
+        PhysicalDisplays.available = false
+        changedModel.startRecovery()
+        precondition(!guideWindow.isArmed && !changedModel.recovery.available)
+        PhysicalDisplays.available = true
+        changedDuringGuide.shutdown {}
+
         let reconnect = try Fixture(directory: root)
         reconnect.arm()
+        precondition(reconnect.coordinator.audioRecoveryStatus.instruction?.contains("第 1 步") == true)
         let original = reconnect.coordinator.display.activeDisplayID
         let lease = reconnect.window.lease!
         reconnect.coordinator.handleConnect() // 同一连接的名称刷新不能提前清除窗口。
@@ -148,10 +216,14 @@ private final class Fixture {
         reconnect.disconnect()
         precondition(reconnect.coordinator.display.removals == 0 && reconnect.coordinator.display.physicalOff)
         precondition(reconnect.coordinator.audioRecoveryStatus.waitingForReconnect)
+        precondition(reconnect.coordinator.audioRecoveryStatus.instruction?.contains("第 2 步") == true)
         reconnect.clock.advance(3)
         reconnect.connect("iPad")
         precondition(reconnect.coordinator.display.activeDisplayID == original && reconnect.coordinator.display.creations == 1)
         precondition(!reconnect.window.isArmed && !FileManager.default.fileExists(atPath: reconnect.marker.path))
+        precondition(reconnect.coordinator.audioRecoveryStatus.instruction?.contains("第 3 步") == true)
+        reconnect.coordinator.handleConnect()
+        precondition(reconnect.coordinator.audioRecoveryStatus.instruction?.contains("第 3 步") == true)
         reconnect.clock.advance(20) // 已取消的到期回调不能拆掉新会话的屏幕。
         precondition(reconnect.coordinator.display.removals == 0)
         reconnect.disconnect()
@@ -193,6 +265,7 @@ private final class Fixture {
         delayedName.disconnect()
         delayedName.coordinator.monitor.connected = true
         delayedName.coordinator.handleConnect()
+        precondition(delayedName.coordinator.audioRecoveryStatus.confirmingReconnect)
         delayedName.clock.advance(15)
         precondition(!delayedName.coordinator.display.isActive)
 

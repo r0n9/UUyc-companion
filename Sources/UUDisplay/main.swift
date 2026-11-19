@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settings = SettingsWindowController()
     let permissions = PermissionsWindowController()
     let tour = TourController()
+    let audioRecoveryGuide = AudioRecoveryGuide()
     var statusBar: StatusBarController?
     private var heartbeatTimer: Timer?
     private var hotKeyRef: EventHotKeyRef?
@@ -49,10 +50,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.setDisablePhysical = { [weak self] in self?.coordinator.setDisablePhysical($0) }
         settings.setPaused = { [weak self] in self?.coordinator.setPaused($0) }
         settings.restorePhysical = { [weak self] in self?.coordinator.restorePhysical() }
-        settings.beginAudioRecovery = { [weak self] in self?.coordinator.beginAudioRecovery() }
+        settings.beginAudioRecovery = { [weak self] in self?.coordinator.requestAudioRecovery() }
         settings.audioRecoveryStatus = { [weak self] in self?.coordinator.audioRecoveryStatus ?? AudioRecoveryStatus() }
+        settings.audioCaptureStatus = { [weak self] in self?.coordinator.audioCaptureStatus ?? AudioCaptureStatus() }
+        settings.refreshAudioCapture = { [weak self] in self?.coordinator.refreshAudioCapture() }
+        coordinator.onShowAudioRecovery = { [weak self] in
+            guard let self else { return }
+            self.audioRecoveryGuide.show(
+                recoveryStatus: { [weak self] in self?.coordinator.audioRecoveryStatus ?? AudioRecoveryStatus() },
+                captureStatus: { [weak self] in self?.coordinator.audioCaptureStatus ?? AudioCaptureStatus() },
+                onStart: { [weak self] in self?.coordinator.beginAudioRecovery() },
+                onStop: { [weak self] in self?.coordinator.stopAudioRecovery() },
+                onRefresh: { [weak self] in self?.coordinator.refreshAudioCapture() })
+        }
         settings.openTour = { [weak self] in self?.tour.show() }
-        coordinator.onChange = { [weak self] in self?.statusBar?.refresh() }
+        coordinator.onChange = { [weak self] in
+            self?.statusBar?.refresh()
+            self?.audioRecoveryGuide.refresh()
+        }
         AboutPage.setUpDebugLabels()
 
         let args = CommandLine.arguments
@@ -63,6 +78,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let i = args.firstIndex(of: "--render-settings"), i + 1 < args.count {
             SettingsWindowController.render(to: URL(fileURLWithPath: args[i + 1]))
+            exit(0)
+        }
+        if let i = args.firstIndex(of: "--render-audio-guide"), i + 1 < args.count {
+            AudioRecoveryGuide.render(to: URL(fileURLWithPath: args[i + 1]))
             exit(0)
         }
         // 调试：渲染 TourKit 导览界面（逐页）后退出：--render-tour-ui <配图目录> <输出目录>
@@ -95,7 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 渲染检查不覆盖正在运行实例的心跳，也不注册其全局恢复快捷键。
         Heartbeat.beat(Heartbeat.appURL)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Heartbeat.beat(Heartbeat.appURL) }
+        let heartbeat = Timer(timeInterval: 1, repeats: true) { _ in Heartbeat.beat(Heartbeat.appURL) }
+        heartbeatTimer = heartbeat
+        // 阅读操作指引或打开菜单时仍保持心跳，避免守护助手误判主程序卡住。
+        RunLoop.main.add(heartbeat, forMode: .common)
         installHotkey()
 
         // 调试：直接走「授权」按钮背后的 PermissionFlow 调用（打开系统设置 + 拖拽面板）

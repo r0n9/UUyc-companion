@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 // 不访问真实 UU 或显示器，只替代 monitor 默认依赖。
 enum UUReader {
@@ -6,6 +7,13 @@ enum UUReader {
     static func readControllers() -> [String]? { nil }
 }
 enum Log { static func info(_ message: String) {} }
+
+// 兼容旧 SDK 的 CFString 别名与新 SDK 的 CFRunLoopMode 包装类型。
+private func runLoopMode(_ name: CFString, as type: CFString.Type) -> CFString { name }
+private func runLoopMode<Mode: RawRepresentable>(_ name: CFString, as type: Mode.Type) -> Mode where Mode.RawValue == CFString {
+    guard let mode = Mode(rawValue: name) else { preconditionFailure("Invalid run loop mode") }
+    return mode
+}
 
 @main struct MonitorTests {
     static func main() {
@@ -35,6 +43,21 @@ enum Log { static func info(_ message: String) {} }
         precondition(connects == 1, "过期的 AX 结果不能重新触发连接")
         precondition(pulses >= 30, "AX 读取不能阻塞主线程")
         heartbeat.invalidate()
-        print("PASS: blocked AX keeps main thread responsive; no overlapping reads; overlay disconnect; stale result rejected")
+        // 操作指引的模态窗口中，连接监测和同样注册在 common modes 的心跳仍可运行。
+        let mode = RunLoop.Mode("NSModalPanelRunLoopMode")
+        CFRunLoopAddCommonMode(CFRunLoopGetMain(), runLoopMode(mode.rawValue as CFString, as: CFRunLoopMode.self))
+        var modalOverlay = true
+        let modalMonitor = UUMonitor(trusted: { false }, hasOverlay: { modalOverlay })
+        modalMonitor.start()
+        precondition(modalMonitor.connected)
+        var modalPulses = 0
+        let commonHeartbeat = Timer(timeInterval: 0.05, repeats: true) { _ in modalPulses += 1 }
+        RunLoop.main.add(commonHeartbeat, forMode: .common)
+        modalOverlay = false
+        let modalDeadline = Date().addingTimeInterval(1.9)
+        while Date() < modalDeadline { RunLoop.main.run(mode: mode, before: modalDeadline) }
+        precondition(!modalMonitor.connected && modalPulses >= 20, "操作指引显示时必须继续监测连接和维持心跳")
+        commonHeartbeat.invalidate()
+        print("PASS: blocked AX keeps main thread responsive; no overlapping reads; overlay disconnect; stale results; monitoring and common-mode heartbeat continue in modal guidance")
     }
 }

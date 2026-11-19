@@ -23,10 +23,28 @@ struct AudioReconnectLease: Codable, Equatable {
 }
 
 struct AudioRecoveryStatus {
+    enum Outcome { case reconnected, expired, finishedWaiting, cancelled }
     var available = false
     var remainingSeconds = 0
     var waitingForReconnect = false
+    var confirmingReconnect = false
     var error: String?
+    var notice: String?
+    var outcome: Outcome?
+
+    var activeStep: Int? {
+        if remainingSeconds > 0 { return waitingForReconnect || confirmingReconnect ? 1 : 0 }
+        if outcome == .reconnected { return 2 }
+        return nil
+    }
+
+    var instruction: String? {
+        guard remainingSeconds > 0 else { return notice }
+        if confirmingReconnect { return "正在确认重新连接的设备，请稍候。" }
+        return waitingForReconnect
+            ? "第 2 步：回到控制设备的 UU远程列表，重新连接同一台 Mac。"
+            : "第 1 步：现在到你手上的设备，在 UU远程中断开当前连接。"
+    }
 }
 
 final class AudioReconnectWindow {

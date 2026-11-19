@@ -6,6 +6,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let coordinator: Coordinator
     private let openSettings: (SettingsPane?) -> Void
     private let store = ConfigStore.shared
+    private var audioStatusItem: NSMenuItem?
 
     init(coordinator: Coordinator, openSettings: @escaping (SettingsPane?) -> Void) {
         self.coordinator = coordinator
@@ -35,6 +36,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         item.button?.image = icon
         item.button?.appearsDisabled = store.config.paused  // 暂停自动切换时图标变灰
         item.button?.toolTip = "UU远程伴侣：\(coordinator.statusText)"
+        audioStatusItem?.title = "远程音频：\(coordinator.audioCaptureStatus.title)"
+        audioStatusItem?.toolTip = coordinator.audioCaptureStatus.explanation
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -47,10 +50,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let physical = action("远程时只保留虚拟屏", #selector(toggleDisablePhysical))
         physical.state = store.config.shouldDisablePhysical ? .on : .off
         menu.addItem(physical)
-        let audio = action("恢复远程声音（保留屏幕 15 秒）", #selector(recoverAudio))
-        audio.isEnabled = coordinator.audioRecoveryStatus.available
-        audio.toolTip = "点击后，在控制端断开，确认连接已关闭，再重新连接同一台 Mac。"
+        let audio = action("恢复远程声音…", #selector(recoverAudio))
+        audio.toolTip = "查看当前音频采集状态与恢复步骤。开始后窗口保持打开并更新进度。"
         menu.addItem(audio)
+        let audioStatus = NSMenuItem(title: "远程音频：\(coordinator.audioCaptureStatus.title)", action: nil, keyEquivalent: "")
+        audioStatus.isEnabled = false
+        audioStatus.toolTip = coordinator.audioCaptureStatus.explanation
+        audioStatusItem = audioStatus
+        menu.addItem(audioStatus)
         menu.addItem(action("设置…", #selector(reconfigure), key: ","))
         menu.addItem(.separator())
         menu.addItem(action("完全退出", #selector(quit), key: "q"))
@@ -66,7 +73,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func reconfigure() { openSettings(nil) }
 
     @objc private func toggleDisablePhysical() { coordinator.setDisablePhysical(!store.config.shouldDisablePhysical) }
-    @objc private func recoverAudio() { coordinator.beginAudioRecovery() }
+    @objc private func recoverAudio() { coordinator.requestAudioRecovery() }
 
     /// 与设置窗口的「完全退出」一致：停掉本次登录中的守护助手，再退出主程序
     @objc private func quit() {

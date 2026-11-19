@@ -91,6 +91,10 @@ final class DisplayManager {
     }
     var isSettled: Bool { !busy }
     var physicalOff: Bool { PhysicalDisplays.pending != nil }
+    var onlyVirtualDisplaysOnline: Bool {
+        guard let ids = onlineDisplayIDs(), !ids.isEmpty else { return false }
+        return ids.allSatisfy { Self.isVirtual($0) }
+    }
 
     static func onlineDisplays() -> [CGDirectDisplayID] {
         checkedOnlineDisplays() ?? []

@@ -8,6 +8,10 @@ final class Coordinator {
     private let store = ConfigStore.shared
     private let audioReconnect: AudioReconnectWindow
     private var audioRecoveryError: String?
+    private var audioRecoveryNotice: String?
+    private let audioCapture: AudioCaptureMonitor
+    private var audioRecoveryOutcome: AudioRecoveryStatus.Outcome?
+    var onShowAudioRecovery: (() -> Void)?
 
     /// 状态变化时通知菜单栏刷新
     var onChange: (() -> Void)?
@@ -22,17 +26,24 @@ final class Coordinator {
 
     var connected: Bool { monitor.connected || simulatedName != nil }
 
-    init(audioReconnect: AudioReconnectWindow = AudioReconnectWindow()) {
+    init(audioReconnect: AudioReconnectWindow = AudioReconnectWindow(),
+         audioCapture: AudioCaptureMonitor = AudioCaptureMonitor()) {
         self.audioReconnect = audioReconnect
+        self.audioCapture = audioCapture
         audioReconnect.onExpire = { [weak self] wasDisconnected in
             guard let self else { return }
             if wasDisconnected {
                 self.namePoll?.invalidate()
                 self.namePoll = nil
                 self.display.remove()
+                self.audioRecoveryNotice = "15 秒已结束，未完成重连；正在恢复屏幕。重新连接后可再次尝试。"
+                self.audioRecoveryOutcome = .expired
                 Log.info("声音恢复重连窗口已到期，恢复物理屏并收尾虚拟屏")
+            } else {
+                self.audioRecoveryNotice = "计时已结束，未检测到完整断开重连；当前会话保留，请播放音频确认声音。"
+                self.audioRecoveryOutcome = .finishedWaiting
             }
-            self.onChange?()
+            self.notifyChange()
         }
     }
 
@@ -40,34 +51,63 @@ final class Coordinator {
         AudioRecoveryStatus(available: connected && !store.config.paused && physicalDisableAllowed
                             && display.physicalOff && display.canRetainForReconnect && !audioReconnect.isArmed,
                             remainingSeconds: audioReconnect.remainingSeconds,
-                            waitingForReconnect: audioReconnect.waitingForReconnect, error: audioRecoveryError)
+                            waitingForReconnect: audioReconnect.waitingForReconnect,
+                            confirmingReconnect: audioReconnect.waitingForReconnect && connected,
+                            error: audioRecoveryError, notice: audioRecoveryNotice, outcome: audioRecoveryOutcome)
+    }
+
+    var audioCaptureStatus: AudioCaptureStatus { audioCapture.status }
+    func refreshAudioCapture() { audioCapture.refresh() }
+
+    /// 打开非模态状态窗口；查看、刷新或重复打开均不开始计时。
+    func requestAudioRecovery() {
+        onShowAudioRecovery?()
     }
 
     func beginAudioRecovery() {
         guard audioRecoveryStatus.available, let id = display.activeDisplayID else { return }
         audioRecoveryError = nil
+        audioRecoveryNotice = nil
+        audioRecoveryOutcome = nil
         if audioReconnect.begin(displayID: id) {
             Log.info("声音恢复：保留虚拟屏 #\(id) 15 秒，请在控制端断开并重新连接")
         } else {
             audioRecoveryError = "未能准备重连窗口，请稍后重试。"
             Log.info("无法保存声音恢复重连记录，保留正常断开行为")
         }
-        onChange?()
+        notifyChange()
     }
 
     private func cancelAudioRecovery() {
         if audioReconnect.cancel() { display.remove() }
         audioRecoveryError = nil
+        audioRecoveryNotice = nil
+        audioRecoveryOutcome = nil
+    }
+
+    func stopAudioRecovery() {
+        guard audioReconnect.isArmed else { return }
+        cancelAudioRecovery()
+        audioRecoveryOutcome = .cancelled
+        audioRecoveryNotice = "已停止本次恢复。需要时可再次开始。"
+        notifyChange()
+    }
+
+    private func notifyChange() {
+        audioCapture.updateContext(connected: connected, displayID: display.activeDisplayID,
+                                   onlyVirtual: display.onlyVirtualDisplaysOnline)
+        onChange?()
     }
 
     func start() {
+        audioCapture.onChange = { [weak self] in self?.onChange?() }
         display.onChange = { [weak self] in
             guard let self else { return }
             if self.audioReconnect.isArmed,
                self.display.wedged || !self.display.physicalOff || self.display.activeDisplayID != self.audioReconnect.lease?.displayID {
                 self.cancelAudioRecovery()
             }
-            self.onChange?()
+            self.notifyChange()
         }
         display.shouldDisablePhysical = { [weak self] in self?.physicalDisableAllowed ?? false }
         display.recoverIfNeeded()
@@ -86,8 +126,11 @@ final class Coordinator {
         if display.wedged { return "⚠️ 屏幕调整已暂停，正在等待系统恢复" }
         if store.config.paused { return "虚拟屏已暂停：连接时不做调整" }
         if audioReconnect.isArmed {
-            return "虚拟屏保留中 · 剩余 \(audioReconnect.remainingSeconds) 秒 · 请在控制端断开并重新连接"
+            let instruction = audioRecoveryStatus.instruction ?? "请按操作指引完成重连。"
+            return "剩余 \(audioReconnect.remainingSeconds) 秒 · \(instruction)"
         }
+        if let audioRecoveryError { return "⚠️ \(audioRecoveryError)" }
+        if let audioRecoveryNotice { return audioRecoveryNotice }
         guard connected else { return "等待其它设备连接中" }
         let who = controllerName ?? "未知设备"
         if let c = display.current, display.isActive {
@@ -99,10 +142,12 @@ final class Coordinator {
     // MARK: - 事件
 
     func handleConnect() {
+        if controllerName == nil { audioRecoveryNotice = nil }
+        audioRecoveryError = nil
         connectedAt = Date()
         controllerName = nil
         openedUUWindow = false
-        onChange?()
+        notifyChange()
         guard !store.config.paused else { return }
         if pollName() { return }
         namePoll?.invalidate()
@@ -113,6 +158,9 @@ final class Coordinator {
     }
 
     func handleDisconnect() {
+        audioRecoveryNotice = nil
+        audioRecoveryOutcome = nil
+        audioRecoveryError = nil
         namePoll?.invalidate()
         namePoll = nil
         if !store.config.paused, physicalDisableAllowed, display.physicalOff, display.canRetainForReconnect,
@@ -123,7 +171,7 @@ final class Coordinator {
             display.remove()
         }
         controllerName = nil
-        onChange?()
+        notifyChange()
     }
 
     /// 返回 true 表示已拿到名称、无需继续轮询
@@ -175,6 +223,8 @@ final class Coordinator {
             if let cfg, cfg.kind != .computer, cfg.hasSize, display.matches(cfg), display.canRetainForReconnect, display.physicalOff,
                audioReconnect.lease?.displayID == display.activeDisplayID, audioReconnect.remainingSeconds > 0 {
                 if audioReconnect.completeReconnect(displayID: display.activeDisplayID) {
+                    audioRecoveryNotice = "第 3 步：已重新连接，请播放一段音频，确认远程声音是否恢复。"
+                    audioRecoveryOutcome = .reconnected
                     Log.info("声音恢复：重连已匹配原虚拟屏，请在控制端确认声音")
                 }
             } else {
@@ -185,7 +235,7 @@ final class Coordinator {
     }
 
     private func apply(_ cfg: DeviceConfig?) {
-        defer { onChange?() }
+        defer { notifyChange() }
         guard let cfg, cfg.kind != .computer, cfg.hasSize else {
             if display.isActive { display.remove() }
             Log.info(cfg == nil ? "无可用配置，不切换" : "「\(cfg!.name)」不指定分辨率或还没填写，不切换")
@@ -206,7 +256,7 @@ final class Coordinator {
         } else if connected {
             handleConnect()
         }
-        onChange?()
+        notifyChange()
     }
 
     /// 配置变更后，若正在被控则按新配置重新应用
@@ -215,7 +265,7 @@ final class Coordinator {
         if connected, !store.config.paused {
             if let name = controllerName { resolve(name) } else { handleConnect() }
         }
-        onChange?()
+        notifyChange()
     }
 
     /// 快捷键 ⌃⌥⌘9 / 菜单：立即恢复物理屏
@@ -223,18 +273,21 @@ final class Coordinator {
         Log.info("手动恢复物理屏")
         cancelAudioRecovery()
         display.restorePhysicalNow()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.onChange?() }
+        notifyChange()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.notifyChange() }
     }
 
     func setDisablePhysical(_ on: Bool) {
         cancelAudioRecovery()
         store.config.disablePhysical = on
         if on { display.disablePhysicalIfNeeded() } else { display.restorePhysicalNow(override: false) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.onChange?() }
+        notifyChange()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.notifyChange() }
     }
 
     func shutdown(completion: @escaping () -> Void) {
         audioReconnect.cancel()
+        audioCapture.updateContext(connected: false, displayID: nil, onlyVirtual: false)
         display.remove(completion: completion)
     }
 }

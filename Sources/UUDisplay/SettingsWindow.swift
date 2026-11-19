@@ -25,6 +25,7 @@ final class SettingsModel: ObservableObject {
     @Published var savedHint = false
     @Published var quickStartShown = false
     @Published var audioRecovery = AudioRecoveryStatus()
+    @Published var audioCapture = AudioCaptureStatus()
 
     let devices = WizardModel()
     var onConfigChanged: (() -> Void)?
@@ -35,6 +36,8 @@ final class SettingsModel: ObservableObject {
     var openTour: (() -> Void)?
     var beginAudioRecovery: (() -> Void)?
     var audioRecoveryStatus: (() -> AudioRecoveryStatus)?
+    var audioCaptureStatus: (() -> AudioCaptureStatus)?
+    var refreshAudioCapture: (() -> Void)?
     private var timer: Timer?
     private let store = ConfigStore.shared
 
@@ -56,6 +59,7 @@ final class SettingsModel: ObservableObject {
 
     func refresh() {
         if let audioRecoveryStatus { audioRecovery = audioRecoveryStatus() }
+        if let audioCaptureStatus { audioCapture = audioCaptureStatus() }
         let running = Watchdog.isRunning
         if running != watchdogRunning { watchdogRunning = running }
         let off = PhysicalDisplays.pending != nil
@@ -313,21 +317,27 @@ struct ControlledPanel: View {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 Text("远程没有声音？").font(.headline)
-                Text("仅保留虚拟屏时若没有声音，可保留当前屏幕 15 秒：在控制端断开，确认连接已关闭，再重新连接同一台 Mac。无需关闭「被控端静音」。")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                AudioCaptureStatusView(status: model.audioCapture, onRefresh: {
+                    model.refreshAudioCapture?()
+                    model.refresh()
+                })
+                AudioRecoveryStepsView(introduction: "先点「查看恢复步骤…」阅读指引，准备好后再开始 15 秒计时。")
                 HStack(spacing: 12) {
-                    Button("恢复远程声音") {
+                    Button("查看恢复步骤…") {
                         model.beginAudioRecovery?()
                         model.refresh()
                     }
-                    .disabled(!model.audioRecovery.available)
                     if model.audioRecovery.remainingSeconds > 0 {
-                        Text("屏幕保留中，剩余 \(model.audioRecovery.remainingSeconds) 秒")
+                        Text("剩余 \(model.audioRecovery.remainingSeconds) 秒")
                             .font(.callout).foregroundStyle(.secondary)
                     } else if !model.audioRecovery.available {
-                        Text("仅在远程已连接、虚拟屏就绪且物理屏已关闭时可用。")
+                        Text("窗口可随时查看，虚拟屏就绪且物理屏关闭后可开始恢复。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                }
+                if let instruction = model.audioRecovery.instruction {
+                    Text(instruction).font(.callout).foregroundStyle(.blue)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let error = model.audioRecovery.error {
                     Text(error).font(.caption).foregroundStyle(.orange)
@@ -535,6 +545,8 @@ final class SettingsWindowController {
     var restorePhysical: (() -> Void)?
     var beginAudioRecovery: (() -> Void)?
     var audioRecoveryStatus: (() -> AudioRecoveryStatus)?
+    var audioCaptureStatus: (() -> AudioCaptureStatus)?
+    var refreshAudioCapture: (() -> Void)?
 
     /// - Parameter pane: 打开时展开的面板，nil 表示全部收起
     func show(pane: SettingsPane? = nil) {
@@ -552,6 +564,8 @@ final class SettingsWindowController {
         model.restorePhysical = restorePhysical
         model.beginAudioRecovery = beginAudioRecovery
         model.audioRecoveryStatus = audioRecoveryStatus
+        model.audioCaptureStatus = audioCaptureStatus
+        model.refreshAudioCapture = refreshAudioCapture
         model.openPermissions = openPermissions
         model.openTour = openTour
         model.start()
@@ -584,6 +598,8 @@ final class SettingsWindowController {
             ("collapsed-physical-on", nil, true, false),
             ("controller", .controller, false, false),
             ("controlled", .controlled, true, false),
+            ("controlled-audio-disconnect", .controlled, true, false),
+            ("controlled-audio-reconnect", .controlled, true, false),
             ("fallback", .fallback, true, true),
         ]
         for (name, pane, physical, watchdog) in cases {
@@ -594,6 +610,11 @@ final class SettingsWindowController {
             model.watchdogRunning = false
             model.expanded = pane
             model.audioRecovery.available = physical
+            if name == "controlled-audio-disconnect" {
+                model.audioRecovery = AudioRecoveryStatus(remainingSeconds: 15)
+            } else if name == "controlled-audio-reconnect" {
+                model.audioRecovery = AudioRecoveryStatus(remainingSeconds: 10, waitingForReconnect: true)
+            }
             let view = NSHostingView(rootView: SettingsView(model: model, forRender: true)
                 .environment(\.colorScheme, .light)
                 .background(Color(nsColor: .windowBackgroundColor)))

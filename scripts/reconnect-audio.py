@@ -66,10 +66,10 @@ def reconnect(cli, device, call=run_cli, clock=time.monotonic, sleep=time.sleep)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="在控制端 Mac 上恢复远程声音：先点击被控端伴侣的恢复按钮，再重连指定设备。")
+    parser = argparse.ArgumentParser(description="在控制端 Mac 上恢复远程声音：先查看被控端伴侣的操作指引，点击开始计时，再重连指定设备。")
     parser.add_argument("--device", required=True, help="目标 Mac 的设备 ID；不会断开其他设备")
     parser.add_argument("--cli", type=Path, default=Path("/Applications/UURemote.app/Contents/Helpers/uuyc-cli"))
-    parser.add_argument("--ready", action="store_true", help="已开启被控端的 15 秒重连窗口，跳过提示")
+    parser.add_argument("--ready", action="store_true", help="已点击被控端的「开始 15 秒重连」，跳过提示")
     arguments = parser.parse_args()
     device = arguments.device.strip()
     if not device or device.startswith("-"):
@@ -78,7 +78,7 @@ def main():
         if device not in connected_ids(run_cli(arguments.cli, ["device", "status"], 2)):
             raise ReconnectError("目标设备当前没有连接，未执行断开或重连。")
         if not arguments.ready:
-            input("请在被控端伴侣点击「恢复远程声音」，然后立即回到这里按回车：")
+            input("请在被控端伴侣查看恢复步骤并点击「开始 15 秒重连」，随后立即回到这里按回车：")
         reconnect(arguments.cli, device)
         print("已确认旧连接关闭并提交一次重连请求，请在控制端确认画面和声音。")
     except (ReconnectError, EOFError, KeyboardInterrupt) as error:
