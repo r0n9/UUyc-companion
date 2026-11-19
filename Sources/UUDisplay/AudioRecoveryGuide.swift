@@ -7,7 +7,7 @@ struct AudioRecoveryStepsView: View {
     private let steps = [
         "在你手上的手机、平板或电脑的 UU远程中，断开当前与这台 Mac 的连接。",
         "等远程画面关闭后，回到 UU远程的设备列表，在 15 秒内重新连接同一台 Mac。",
-        "重新连接后播放一段音频，确认远程声音是否恢复。",
+        "重新连接后，点击恢复窗口中的「播放测试声音」，在控制设备上确认是否听到提示音。",
     ]
 
     var body: some View {
@@ -92,6 +92,26 @@ private struct AudioRecoveryGuideView: View {
                 introduction: model.recovery.remainingSeconds > 0 ? "请按当前高亮步骤操作。" :
                     (model.recovery.outcome == .reconnected ? "重连已完成，请先确认声音；仍无声时可再次尝试。" : "阅读说明不计时；准备好后再开始。"),
                 activeStep: model.recovery.activeStep)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("验证远程声音", systemImage: "speaker.wave.2").font(.headline)
+                    Spacer()
+                    Button(model.testSoundState == .playing ? "停止播放" : "播放测试声音") {
+                        if model.testSoundState == .playing { model.stopTestSound() }
+                        else { model.playTestSound() }
+                    }
+                    .disabled(model.testSoundState != .playing && !model.canPlayTestSound)
+                }
+                Text(model.testSoundMessage)
+                    .font(.callout).foregroundStyle(model.testSoundState == .failed ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(model.canPlayTestSound
+                     ? "请在控制端开启「播放远程声音」，并确认控制设备的音量已打开。UU 的「被控端静音」可保持开启。"
+                     : "请完成远程重连后，再播放测试声音。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
             Divider()
             HStack {
                 Button(model.recovery.remainingSeconds > 0 ? "停止本次恢复" : "关闭") {
@@ -166,11 +186,17 @@ final class AudioRecoveryGuide: NSObject, NSWindowDelegate {
         render(to: parent.appendingPathComponent("\(base)-completed.png"),
                recovery: AudioRecoveryStatus(available: true, notice: "已重新连接，请播放音频确认远程声音。", outcome: .reconnected),
                capture: AudioCaptureStatus(kind: .detected))
+        render(to: parent.appendingPathComponent("\(base)-playing.png"),
+               recovery: AudioRecoveryStatus(available: true, notice: "已重新连接，请播放音频确认远程声音。", outcome: .reconnected),
+               capture: AudioCaptureStatus(kind: .detected), testSoundState: .playing)
     }
 
-    private static func render(to url: URL, recovery: AudioRecoveryStatus, capture: AudioCaptureStatus) {
+    private static func render(to url: URL, recovery: AudioRecoveryStatus, capture: AudioCaptureStatus,
+                               testSoundState: AudioRecoveryGuideModel.TestSoundState = .idle) {
         let model = AudioRecoveryGuideModel(recoveryStatus: { recovery }, captureStatus: { capture },
                                             onStart: {}, onStop: {}, onRefresh: {})
+        model.testSoundState = testSoundState
+        model.testSoundRemainingSeconds = testSoundState == .playing ? 3 : 0
         let view = NSHostingView(rootView: AudioRecoveryGuideView(model: model, onClose: {})
             .environment(\.colorScheme, .light)
             .background(Color(nsColor: .windowBackgroundColor)))

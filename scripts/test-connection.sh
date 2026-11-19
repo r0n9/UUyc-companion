@@ -15,7 +15,7 @@ swiftc -I "$TEST_DIR" -L "$TEST_DIR" -lCGVirtualDisplayBridge -Xlinker -rpath -X
 "$TEST_DIR/display-tests"
 swiftc Sources/UUDisplay/Config.swift Sources/UUDisplay/PhysicalDisplays.swift tests/display-config-main.swift -o "$TEST_DIR/display-config-tests"
 "$TEST_DIR/display-config-tests"
-swiftc Sources/UUDisplay/AudioCaptureState.swift Sources/UUDisplay/AudioReconnectWindow.swift Sources/UUDisplay/AudioRecoveryGuideModel.swift Sources/UUDisplay/WatchdogRecoveryPolicy.swift Sources/UUDisplay/Coordinator.swift tests/audio-recovery-main.swift -o "$TEST_DIR/audio-recovery-tests"
+swiftc Sources/UUDisplay/AudioCaptureState.swift Sources/UUDisplay/AudioReconnectWindow.swift Sources/UUDisplay/AudioTestSoundPlayer.swift Sources/UUDisplay/AudioRecoveryGuideModel.swift Sources/UUDisplay/WatchdogRecoveryPolicy.swift Sources/UUDisplay/Coordinator.swift tests/audio-recovery-main.swift -o "$TEST_DIR/audio-recovery-tests"
 "$TEST_DIR/audio-recovery-tests"
 swiftc Sources/UUDisplay/AudioCaptureState.swift Sources/UUDisplay/AudioCaptureMonitor.swift tests/audio-capture-main.swift -o "$TEST_DIR/audio-capture-tests"
 "$TEST_DIR/audio-capture-tests"

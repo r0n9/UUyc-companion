@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 // 编译实际 Coordinator 与重连状态机，替代 UU、显示器和用户配置，避免访问真实服务。
 enum DeviceKind { case computer, tablet, phone }
@@ -97,6 +98,19 @@ private final class Clock {
     }
 }
 
+private final class TestSoundPlayer: AudioTestSoundPlaying {
+    enum Failure: Error { case unavailable }
+    var onFinish: ((Bool) -> Void)?
+    var plays = 0
+    var stops = 0
+    var fails = false
+    func play() throws {
+        plays += 1
+        if fails { throw Failure.unavailable }
+    }
+    func stop() { stops += 1 }
+}
+
 private final class Fixture {
     let clock = Clock()
     let marker: URL
@@ -141,6 +155,66 @@ private final class Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+
+        // 解码内置音频但不播放到真实设备；测试播放与连接/恢复状态相互独立。
+        let tone = AudioTestTone.waveData()
+        let decoded = try AVAudioPlayer(data: tone, fileTypeHint: AVFileType.wav.rawValue)
+        precondition(abs(decoded.duration - 4) < 0.01 && decoded.numberOfChannels == 2)
+        precondition(tone.count == 44 + 4 * 44_100 * 4)
+        var hasSignal = false
+        for offset in stride(from: 44, to: tone.count, by: 4) {
+            precondition(tone[offset] == tone[offset + 2] && tone[offset + 1] == tone[offset + 3])
+            if tone[offset] != 0 || tone[offset + 1] != 0 { hasSignal = true }
+        }
+        precondition(hasSignal, "测试音必须包含可听信号，且左右声道均可试听")
+        let sound = TestSoundPlayer()
+        let soundClock = Clock()
+        var soundRecovery = AudioRecoveryStatus(available: true)
+        var soundCapture = AudioCaptureStatus(kind: .suspected)
+        let soundModel = AudioRecoveryGuideModel(
+            recoveryStatus: { soundRecovery }, captureStatus: { soundCapture },
+            onStart: { soundRecovery = AudioRecoveryStatus(remainingSeconds: 15) },
+            onStop: {}, onRefresh: {}, testSoundPlayer: sound, uptime: { soundClock.uptime })
+        precondition(sound.plays == 0 && soundModel.canPlayTestSound)
+        soundModel.playTestSound()
+        let oldCompletion = sound.onFinish
+        soundModel.playTestSound() // 播放中重复点击不会叠加声音。
+        precondition(sound.plays == 1 && soundModel.testSoundState == .playing)
+        soundClock.advance(1.2)
+        soundModel.refresh()
+        precondition(soundModel.testSoundRemainingSeconds == 3)
+        soundModel.stopTestSound()
+        precondition(sound.stops == 1 && soundModel.testSoundState == .stopped)
+        soundModel.playTestSound()
+        oldCompletion?(true)
+        precondition(soundModel.testSoundState == .playing, "旧播放回调不能影响新的试听")
+        sound.onFinish?(true)
+        precondition(soundModel.testSoundState == .finished && soundModel.capture.kind == .suspected)
+        precondition(soundModel.testSoundMessage.contains("如果控制设备听到了"))
+        soundModel.playTestSound()
+        soundModel.startRecovery()
+        precondition(soundModel.testSoundState == .stopped && !soundModel.canPlayTestSound)
+        let playsBeforeWaiting = sound.plays
+        soundModel.playTestSound()
+        precondition(sound.plays == playsBeforeWaiting)
+        soundRecovery = AudioRecoveryStatus(available: true, outcome: .reconnected)
+        soundModel.refresh()
+        precondition(sound.plays == playsBeforeWaiting, "重连完成不自动播放")
+        soundModel.playTestSound()
+        soundCapture = AudioCaptureStatus(kind: .disconnected)
+        soundModel.refresh()
+        precondition(soundModel.testSoundState == .stopped && !soundModel.canPlayTestSound)
+        soundCapture = AudioCaptureStatus(kind: .unknown)
+        soundModel.playTestSound()
+        soundModel.stopUpdating() // 与实际窗口关闭共用清理入口。
+        precondition(soundModel.testSoundState == .stopped && sound.onFinish == nil)
+        sound.fails = true
+        soundModel.playTestSound()
+        precondition(soundModel.testSoundState == .failed && soundModel.testSoundRemainingSeconds == 0)
+        sound.fails = false
+        soundModel.playTestSound()
+        sound.onFinish?(false)
+        precondition(soundModel.testSoundState == .failed && soundModel.canPlayTestSound)
 
         let normal = try Fixture(directory: root)
         normal.disconnect()
